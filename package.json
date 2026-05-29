@@ -16,6 +16,8 @@
     "react-router-dom": "^7.16.0"
   },
   "devDependencies": {
+    "@emnapi/core": "1.10.0",
+    "@emnapi/runtime": "1.10.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.12.3",
     "@types/react": "^19.2.14",
