@@ -1,5 +1,5 @@
 type StatusPillProps = {
-  tone?: 'success' | 'warning' | 'danger' | 'neutral'
+  tone?: 'success' | 'warning' | 'danger' | 'info' | 'neutral'
   children: React.ReactNode
 }
 

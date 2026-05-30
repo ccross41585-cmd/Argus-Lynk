@@ -8,11 +8,11 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['app-icon.svg', 'app-icon-maskable.svg'],
+      includeAssets: ['app-icon.svg', 'app-icon-maskable.svg', 'argus-lynk-logo.png'],
       manifest: {
-        name: 'Argus Control',
-        short_name: 'Argus',
-        description: 'Mobile-first control surface for ESP32 LoRa field devices.',
+        name: 'Argus Lynk Home Base',
+        short_name: 'Argus Lynk',
+        description: 'Tablet-first home base dashboard for ESP32 LoRa field devices and gateway routing.',
         theme_color: '#182321',
         background_color: '#101816',
         display: 'standalone',

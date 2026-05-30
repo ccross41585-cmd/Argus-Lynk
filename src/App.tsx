@@ -21,8 +21,13 @@ function ProtectedRoute({ isAuthenticated, isBooting, children }: ProtectedRoute
     return (
       <main className="auth-shell">
         <section className="panel auth-card">
-          <p className="eyebrow">Booting</p>
-          <h1>Loading controller session</h1>
+          <div className="login-brand">
+            <img className="login-brand__logo" src="/argus-lynk-logo.png" alt="Argus Lynk" />
+            <div>
+              <p className="eyebrow">Booting</p>
+              <h1>Loading Argus Lynk</h1>
+            </div>
+          </div>
           <p className="muted-copy">Checking Supabase auth and local operator mode.</p>
         </section>
       </main>
@@ -115,7 +120,7 @@ function App() {
         <Route path="/devices/:deviceId" element={<DeviceDetailPage />} />
         <Route
           path="/settings"
-          element={<SettingsPage localMode={localMode} onSignOut={handleSignOut} />}
+          element={<SettingsPage localMode={localMode} userId={session?.user.id ?? null} onSignOut={handleSignOut} />}
         />
       </Route>
       <Route

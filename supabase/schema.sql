@@ -44,6 +44,23 @@ create index if not exists idx_device_commands_status_created_at
 create index if not exists idx_devices_gateway_id
   on public.devices (gateway_id);
 
+-- User profile: stores location preferences per authenticated user.
+-- Linked to auth.users via id (same UUID).
+create table if not exists public.user_profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  location_label text null,        -- Human-readable e.g. "Abilene, Texas, US"
+  latitude numeric(9, 6) null,
+  longitude numeric(9, 6) null,
+  timezone text null,              -- IANA timezone e.g. "America/Chicago"
+  updated_at timestamptz not null default now()
+);
+
+-- Row-level security: each user can only read/write their own profile.
+alter table public.user_profiles enable row level security;
+
+create policy "user_profiles_owner" on public.user_profiles
+  for all using (auth.uid() = id) with check (auth.uid() = id);
+
 do $$
 begin
   if not exists (

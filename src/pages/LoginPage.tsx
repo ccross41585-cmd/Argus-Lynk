@@ -47,9 +47,15 @@ export function LoginPage({ onContinueLocalMode }: LoginPageProps) {
   return (
     <main className="auth-shell">
       <section className="panel auth-card stack">
+        <div className="login-brand">
+          <img className="login-brand__logo" src="/argus-lynk-logo.png" alt="Argus Lynk" />
+          <div>
+            <p className="eyebrow">Argus Lynk Home Base</p>
+            <h1>Argus Lynk</h1>
+          </div>
+        </div>
+
         <div>
-          <p className="eyebrow">Field Controller Login</p>
-          <h1>Argus Control</h1>
           <p className="section-copy">
             Sign in with a Supabase user, or enter local test mode while RLS remains disabled.
           </p>
