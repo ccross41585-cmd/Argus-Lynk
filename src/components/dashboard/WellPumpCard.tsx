@@ -24,37 +24,37 @@ export function WellPumpCard({
   onRestart,
   onViewDetails,
 }: WellPumpCardProps) {
+  const isRunning = pumpPower === 'ON'
+  const hasAlert = alertState === 'Long Run Alert'
+
   return (
-    <section className="command-card command-card--pump" id="well-pump">
-      <div className="command-card__header">
+    <section className="panel-card" id="well-pump">
+      <div className="panel-card__header">
         <div>
           <p className="eyebrow">Well Pump</p>
-          <h2>Simple contactor status and runtime</h2>
+          <h2 className="panel-card__title">Contactor status &amp; runtime</h2>
         </div>
-        <StatusPill tone={alertState === 'Long Run Alert' ? 'warning' : 'info'}>{alertState}</StatusPill>
+        <StatusPill tone={hasAlert ? 'warning' : 'info'}>{alertState}</StatusPill>
       </div>
 
-      <div className="command-card__hero command-card__hero--blue">
-        <span className="label">Pump Power</span>
-        <strong>{pumpPower}</strong>
-        <p className="muted-copy">Runtime {runtime}</p>
-      </div>
-
-      <div className="command-card__details">
-        <div className="info-tile">
-          <span className="label">Field Node</span>
-          <strong>{fieldNode}</strong>
+      <div className="panel-card__hero">
+        <div>
+          <span className="label">Pump Power</span>
+          <strong className={`hero-value hero-value--${isRunning ? 'blue' : 'muted'}`}>{pumpPower}</strong>
         </div>
-        <div className="info-tile">
+        <div>
           <span className="label">Runtime</span>
-          <strong>{runtime}</strong>
+          <strong className="hero-sub">{runtime}</strong>
         </div>
-        <div className="info-tile">
-          <span className="label">Alert</span>
-          <strong>{alertState}</strong>
+      </div>
+
+      <div className="data-rows">
+        <div className="data-row">
+          <span className="label">Field Node</span>
+          <strong className={fieldNode === 'Online' ? 'value-green' : 'value-danger'}>{fieldNode}</strong>
         </div>
-        <div className="info-tile info-tile--wide">
-          <span className="label">Feedback</span>
+        <div className="data-row">
+          <span className="label">Contactor Feedback</span>
           <strong>{feedback}</strong>
         </div>
       </div>
@@ -71,19 +71,19 @@ export function WellPumpCard({
         >
           {latestCommand.command_type === 'WELL_PUMP_SHUTOFF' && latestCommand.status !== 'confirmed'
             ? 'Shutdown command sent. Waiting for field node confirmation...'
-            : `Latest command: ${latestCommand.command_type} is ${latestCommand.status}.`}
+            : `Latest command: ${latestCommand.command_type} — ${latestCommand.status}`}
         </div>
       )}
 
-      <div className="button-row button-row--triple">
+      <div className="panel-card__actions">
         <button type="button" className="danger-button" onClick={onShutOff}>
-          Shut Off Pump
+          Shut Off
         </button>
         <button type="button" className="primary-button" onClick={onRestart}>
-          Restart Pump
+          Restart
         </button>
-        <button type="button" className="secondary-button" onClick={onViewDetails}>
-          View Details
+        <button type="button" className="ghost-button" onClick={onViewDetails}>
+          Details
         </button>
       </div>
     </section>

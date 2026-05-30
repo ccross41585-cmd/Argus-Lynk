@@ -14,35 +14,32 @@ export function QuickActionsPanel({
   onViewSystemHealth,
 }: QuickActionsPanelProps) {
   return (
-    <section className="stack-card" id="system">
-      <div>
-        <p className="eyebrow">System Health</p>
-        <h2>Gateway routing state</h2>
-      </div>
+    <div className="right-section" id="system">
+      <p className="eyebrow">Quick Actions</p>
 
-      <div className="stack-card__body">
-        <div className="info-tile">
+      <div className="data-rows">
+        <div className="data-row">
           <span className="label">Queue Depth</span>
           <strong>{queueDepth}</strong>
         </div>
-        <div className="info-tile">
+        <div className="data-row">
           <span className="label">Awaiting Confirmation</span>
           <strong>{awaitingConfirmations}</strong>
         </div>
-        <div className="info-tile info-tile--wide">
+        <div className="data-row data-row--full">
           <span className="label">Last Command</span>
-          <strong>{lastCommand}</strong>
+          <span className="value-mono">{lastCommand}</span>
         </div>
       </div>
 
-      <div className="button-row button-row--stacked">
-        <button type="button" className="secondary-button" onClick={onSilenceAlerts}>
+      <div className="compact-card__actions">
+        <button type="button" className="secondary-button btn-sm" onClick={onSilenceAlerts}>
           Silence Alerts
         </button>
-        <button type="button" className="ghost-button" onClick={onViewSystemHealth}>
-          View System Health
+        <button type="button" className="ghost-button btn-sm" onClick={onViewSystemHealth}>
+          System Health
         </button>
       </div>
-    </section>
+    </div>
   )
 }

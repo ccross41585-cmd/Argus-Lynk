@@ -9,36 +9,35 @@ type AlertsPanelProps = {
 
 export function AlertsPanel({ alerts, onOpenLongRunAlert, onAcknowledge }: AlertsPanelProps) {
   return (
-    <section className="stack-card" id="alerts">
-      <div className="command-card__header">
-        <div>
-          <p className="eyebrow">Active Alerts</p>
-          <h2>What needs attention now</h2>
-        </div>
-      </div>
+    <div className="right-section" id="alerts">
+      <p className="eyebrow">Active Alerts</p>
 
-      <div className="alerts-panel__list">
-        {alerts.map((alert) => {
-          const tone = alert.severity === 'critical' ? 'danger' : alert.severity === 'warning' ? 'warning' : 'info'
-          const isWellPumpAlert = alert.type === 'well_pump_long_runtime'
+      {alerts.length === 0 ? (
+        <p className="muted-copy empty-state">No active alerts.</p>
+      ) : (
+        <div className="alert-rows">
+          {alerts.map((alert) => {
+            const tone = alert.severity === 'critical' ? 'danger' : alert.severity === 'warning' ? 'warning' : 'info'
+            const isWellPumpAlert = alert.type === 'well_pump_long_runtime'
 
-          return (
-            <article key={alert.id} className="alerts-panel__item">
-              <div className="alerts-panel__copy">
-                <StatusPill tone={tone}>{alert.severity}</StatusPill>
-                <strong>{alert.message}</strong>
+            return (
+              <div key={alert.id} className="alert-row-flat">
+                <div className="alert-row-flat__copy">
+                  <StatusPill tone={tone}>{alert.severity}</StatusPill>
+                  <span>{alert.message}</span>
+                </div>
+                <button
+                  type="button"
+                  className={isWellPumpAlert ? 'primary-button btn-sm' : 'ghost-button btn-sm'}
+                  onClick={isWellPumpAlert ? onOpenLongRunAlert : () => onAcknowledge(alert.id)}
+                >
+                  {isWellPumpAlert ? 'Review' : 'Ack'}
+                </button>
               </div>
-              <button
-                type="button"
-                className={isWellPumpAlert ? 'primary-button' : 'ghost-button'}
-                onClick={isWellPumpAlert ? onOpenLongRunAlert : () => onAcknowledge(alert.id)}
-              >
-                {isWellPumpAlert ? 'Review Alert' : 'Acknowledge'}
-              </button>
-            </article>
-          )
-        })}
-      </div>
-    </section>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }

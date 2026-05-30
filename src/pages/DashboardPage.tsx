@@ -486,71 +486,85 @@ export function DashboardPage() {
         ))}
       </section>
 
-      <section className="dashboard-main-grid">
-        <WellPumpCard
-          pumpPower={overview.wellPump.pumpPower}
-          runtime={overview.wellPump.runtime}
-          fieldNode={overview.wellPump.fieldNode}
-          feedback={overview.wellPump.feedback}
-          alertState={overview.wellPump.alertState}
-          latestCommand={latestCommand}
-          onShutOff={() => void openLongRunWorkflow()}
-          onRestart={() => void handleRestartWellPump()}
-          onViewDetails={() => setBanner({ tone: 'info', message: 'Pump detail drill-down can connect to live node history next.' })}
-        />
+      <section className="content-grid">
+        {/* Left column: primary controls */}
+        <div className="content-col content-col--main">
+          <WellPumpCard
+            pumpPower={overview.wellPump.pumpPower}
+            runtime={overview.wellPump.runtime}
+            fieldNode={overview.wellPump.fieldNode}
+            feedback={overview.wellPump.feedback}
+            alertState={overview.wellPump.alertState}
+            latestCommand={latestCommand}
+            onShutOff={() => void openLongRunWorkflow()}
+            onRestart={() => void handleRestartWellPump()}
+            onViewDetails={() => setBanner({ tone: 'info', message: 'Pump detail drill-down can connect to live node history next.' })}
+          />
 
-        <FenceControllerCard
-          chargerPower={overview.fenceLine.chargerPower}
-          fieldNode={overview.fenceLine.fieldNode}
-          lastCommand={overview.fenceLine.lastCommand}
-          feedback={overview.fenceLine.feedback}
-          note={overview.fenceLine.verificationNote}
-          latestCommand={latestCommand}
-          onTurnOn={() => void handleFenceCommand('FENCE_TURN_ON')}
-          onTurnOff={() => void handleFenceCommand('FENCE_TURN_OFF')}
-          onTestRelay={() => void handleFenceCommand('FENCE_TEST_RELAY')}
-        />
+          <div className="secondary-row">
+            <FreezerCard
+              temperature={overview.freezer.temperature}
+              safeRange={overview.freezer.safeRange}
+              node={overview.freezer.node}
+              lastUpdated={overview.freezer.lastUpdatedLabel}
+              alertState={overview.freezer.state}
+              onViewDetails={() => setBanner({ tone: 'info', message: 'Freezer detail view is ready for live telemetry integration.' })}
+            />
 
-        <FreezerCard
-          temperature={overview.freezer.temperature}
-          safeRange={overview.freezer.safeRange}
-          node={overview.freezer.node}
-          lastUpdated={overview.freezer.lastUpdatedLabel}
-          alertState={overview.freezer.state}
-          onViewDetails={() => setBanner({ tone: 'info', message: 'Freezer detail view is ready for live telemetry integration.' })}
-        />
-      </section>
+            <WeatherCard
+              temperatureF={liveWeather?.temperatureF}
+              temperatureText={overview.weather.temperature}
+              summary={liveWeather?.summary ?? overview.weather.summary}
+              condition={liveWeather?.condition}
+              isDay={liveWeather?.isDay}
+              windSpeedMph={liveWeather?.windSpeedMph}
+              humidity={liveWeather?.humidity}
+            />
+          </div>
+        </div>
 
-      <section className="dashboard-bottom-grid">
-        <AlertsPanel
-          alerts={activeAlerts}
-          onOpenLongRunAlert={() => void openLongRunWorkflow()}
-          onAcknowledge={(alertId) => void handleAcknowledgeAlert(alertId)}
-        />
+        {/* Right column: field controls panel */}
+        <aside className="field-controls-panel">
+          <p className="eyebrow field-controls-panel__title">Field Controls</p>
 
-        <DrivewayAlarmCard
-          status={overview.drivewayAlarm.status}
-          lastTriggered={overview.drivewayAlarm.lastTriggered}
-          node={overview.drivewayAlarm.node}
-        />
+          <FenceControllerCard
+            chargerPower={overview.fenceLine.chargerPower}
+            fieldNode={overview.fenceLine.fieldNode}
+            lastCommand={overview.fenceLine.lastCommand}
+            feedback={overview.fenceLine.feedback}
+            note={overview.fenceLine.verificationNote}
+            latestCommand={latestCommand}
+            onTurnOn={() => void handleFenceCommand('FENCE_TURN_ON')}
+            onTurnOff={() => void handleFenceCommand('FENCE_TURN_OFF')}
+            onTestRelay={() => void handleFenceCommand('FENCE_TEST_RELAY')}
+          />
 
-        <WeatherCard
-          temperatureF={liveWeather?.temperatureF}
-          temperatureText={overview.weather.temperature}
-          summary={liveWeather?.summary ?? overview.weather.summary}
-          condition={liveWeather?.condition}
-          isDay={liveWeather?.isDay}
-          windSpeedMph={liveWeather?.windSpeedMph}
-          humidity={liveWeather?.humidity}
-        />
+          <div className="right-divider" />
 
-        <QuickActionsPanel
-          queueDepth={overview.system.queueDepth}
-          awaitingConfirmations={overview.system.awaitingConfirmations}
-          lastCommand={latestCommand ? `${latestCommand.command_type} · ${latestCommand.status}` : overview.system.lastCommand}
-          onSilenceAlerts={() => void handleSilenceAlert()}
-          onViewSystemHealth={() => setBanner({ tone: 'info', message: `Last sync ${formatUpdatedAt(overview.lastUpdated)}.` })}
-        />
+          <DrivewayAlarmCard
+            status={overview.drivewayAlarm.status}
+            lastTriggered={overview.drivewayAlarm.lastTriggered}
+            node={overview.drivewayAlarm.node}
+          />
+
+          <div className="right-divider" />
+
+          <AlertsPanel
+            alerts={activeAlerts}
+            onOpenLongRunAlert={() => void openLongRunWorkflow()}
+            onAcknowledge={(alertId) => void handleAcknowledgeAlert(alertId)}
+          />
+
+          <div className="right-divider" />
+
+          <QuickActionsPanel
+            queueDepth={overview.system.queueDepth}
+            awaitingConfirmations={overview.system.awaitingConfirmations}
+            lastCommand={latestCommand ? `${latestCommand.command_type} · ${latestCommand.status}` : overview.system.lastCommand}
+            onSilenceAlerts={() => void handleSilenceAlert()}
+            onViewSystemHealth={() => setBanner({ tone: 'info', message: `Last sync ${formatUpdatedAt(overview.lastUpdated)}.` })}
+          />
+        </aside>
       </section>
 
       <LongRunAlertModal

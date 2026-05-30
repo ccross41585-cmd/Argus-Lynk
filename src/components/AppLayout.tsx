@@ -1,4 +1,5 @@
-import { Outlet } from 'react-router-dom'
+import { Bell, Home, Settings2 } from 'lucide-react'
+import { NavLink, Outlet } from 'react-router-dom'
 import { Sidebar } from './dashboard/Sidebar'
 
 type AppLayoutProps = {
@@ -16,6 +17,28 @@ export function AppLayout({ localMode, onSignOut }: AppLayoutProps) {
           <Outlet />
         </main>
       </div>
+
+      <nav className="mobile-nav" aria-label="Mobile navigation">
+        <NavLink
+          to="/dashboard"
+          end
+          className={({ isActive }) => `mobile-nav__link${isActive ? ' active' : ''}`}
+        >
+          <Home size={22} aria-hidden="true" />
+          <span>Home</span>
+        </NavLink>
+        <a href="/dashboard#alerts" className="mobile-nav__link">
+          <Bell size={22} aria-hidden="true" />
+          <span>Alerts</span>
+        </a>
+        <NavLink
+          to="/settings"
+          className={({ isActive }) => `mobile-nav__link${isActive ? ' active' : ''}`}
+        >
+          <Settings2 size={22} aria-hidden="true" />
+          <span>Settings</span>
+        </NavLink>
+      </nav>
     </div>
   )
 }

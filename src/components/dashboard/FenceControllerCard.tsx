@@ -25,53 +25,43 @@ export function FenceControllerCard({
   onTestRelay,
 }: FenceControllerCardProps) {
   return (
-    <section className="command-card command-card--fence" id="fence-line">
-      <div className="command-card__header">
-        <div>
-          <p className="eyebrow">Fence Controller</p>
-          <h2>Charger control and contactor feedback</h2>
-        </div>
+    <section className="compact-card" id="fence-line">
+      <div className="compact-card__header">
+        <p className="eyebrow">Fence Controller</p>
         <StatusPill tone={chargerPower === 'ON' ? 'success' : 'neutral'}>{chargerPower}</StatusPill>
       </div>
 
-      <div className="command-card__hero">
-        <span className="label">Charger Power</span>
-        <strong>{chargerPower}</strong>
-      </div>
-
-      <div className="command-card__details">
-        <div className="info-tile">
-          <span className="label">Field Node</span>
-          <strong>{fieldNode}</strong>
+      <div className="data-rows">
+        <div className="data-row">
+          <span className="label">Charger Power</span>
+          <strong className={chargerPower === 'ON' ? 'value-green' : 'value-muted'}>{chargerPower}</strong>
         </div>
-        <div className="info-tile">
+        <div className="data-row">
+          <span className="label">Field Node</span>
+          <strong className={fieldNode === 'Online' ? 'value-green' : 'value-danger'}>{fieldNode}</strong>
+        </div>
+        <div className="data-row">
           <span className="label">Last Command</span>
           <strong>{lastCommand}</strong>
         </div>
-        <div className="info-tile info-tile--wide">
-          <span className="label">Feedback</span>
+        <div className="data-row">
+          <span className="label">Contactor Feedback</span>
           <strong>{feedback}</strong>
         </div>
       </div>
 
-      <p className="command-card__note">{note}</p>
+      <p className="inline-note">{note}</p>
 
       {latestCommand && latestCommand.target_device_id === 'fence-line-1' && (
         <div className="alert alert--neutral">
-          Last fence command: {latestCommand.command_type} is {latestCommand.status}.
+          {latestCommand.command_type} — {latestCommand.status}
         </div>
       )}
 
-      <div className="button-row button-row--triple">
-        <button type="button" className="primary-button" onClick={onTurnOn}>
-          Turn Fence On
-        </button>
-        <button type="button" className="secondary-button" onClick={onTurnOff}>
-          Turn Fence Off
-        </button>
-        <button type="button" className="ghost-button" onClick={onTestRelay}>
-          Test Relay
-        </button>
+      <div className="compact-card__actions">
+        <button type="button" className="primary-button" onClick={onTurnOn}>On</button>
+        <button type="button" className="secondary-button" onClick={onTurnOff}>Off</button>
+        <button type="button" className="ghost-button" onClick={onTestRelay}>Test</button>
       </div>
     </section>
   )

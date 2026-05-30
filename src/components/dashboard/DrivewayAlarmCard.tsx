@@ -10,23 +10,20 @@ export function DrivewayAlarmCard({ status, lastTriggered, node }: DrivewayAlarm
   const tone = status === 'Motion Detected' ? 'warning' : status === 'Node Offline' ? 'danger' : 'success'
 
   return (
-    <section className="stack-card" id="driveway-alarm">
-      <div className="command-card__header">
-        <div>
-          <p className="eyebrow">Driveway Alarm</p>
-          <h2>Motion node</h2>
-        </div>
+    <section className="compact-card" id="driveway-alarm">
+      <div className="compact-card__header">
+        <p className="eyebrow">Driveway Alarm</p>
         <StatusPill tone={tone}>{status}</StatusPill>
       </div>
 
-      <div className="stack-card__body">
-        <div className="info-tile">
+      <div className="data-rows">
+        <div className="data-row">
           <span className="label">Last Triggered</span>
           <strong>{lastTriggered}</strong>
         </div>
-        <div className="info-tile">
+        <div className="data-row">
           <span className="label">Field Node</span>
-          <strong>{node}</strong>
+          <strong className={node === 'Online' ? 'value-green' : 'value-danger'}>{node}</strong>
         </div>
       </div>
     </section>
