@@ -9,6 +9,9 @@ export type DashboardDeviceType =
   | 'freezer'
   | 'weather'
   | 'driveway'
+  | 'relay_node'
+  | 'sensor_node'
+  | 'custom'
 
 export type DeviceHealthStatus = 'online' | 'offline' | 'warning' | 'critical'
 
@@ -72,6 +75,10 @@ export interface DashboardDevice {
   tenant_id: string
   name: string
   type: DashboardDeviceType
+  location?: string
+  enabled: boolean
+  sort_order: number
+  pinned?: boolean
   status: DeviceHealthStatus
   last_seen: string
   metadata: Record<string, string | number | boolean | null>

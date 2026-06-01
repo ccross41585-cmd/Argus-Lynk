@@ -4,6 +4,10 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppLayout } from './components/AppLayout'
 import { DashboardPage } from './pages/DashboardPage'
 import { DeviceDetailPage } from './pages/DeviceDetailPage'
+import { DevicesPage } from './pages/DevicesPage'
+import { AlertsPage } from './pages/AlertsPage'
+import { HistoryPage } from './pages/HistoryPage'
+import { SystemPage } from './pages/SystemPage'
 import { LoginPage } from './pages/LoginPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { supabase } from './lib/supabase'
@@ -117,7 +121,11 @@ function App() {
       >
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/devices" element={<DevicesPage />} />
         <Route path="/devices/:deviceId" element={<DeviceDetailPage />} />
+        <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/history" element={<HistoryPage />} />
+        <Route path="/system" element={<SystemPage />} />
         <Route
           path="/settings"
           element={<SettingsPage localMode={localMode} userId={session?.user.id ?? null} onSignOut={handleSignOut} />}

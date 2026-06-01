@@ -1,5 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { DrivewayAlarmCard } from '../components/dashboard/DrivewayAlarmCard'
+import { FenceControllerCard } from '../components/dashboard/FenceControllerCard'
+import { FreezerCard } from '../components/dashboard/FreezerCard'
+import { LongRunAlertModal } from '../components/dashboard/LongRunAlertModal'
+import { WellPumpCard } from '../components/dashboard/WellPumpCard'
 import { StatusPill } from '../components/StatusPill'
 import {
   formatTimestamp,
@@ -7,7 +12,234 @@ import {
   humanizeToken,
   isPendingStatus,
 } from '../lib/display'
+import {
+  acknowledgeAlert,
+  createCommand,
+  getAlerts,
+  getDeviceById,
+  getDashboardStatus,
+  silenceAlert,
+} from '../lib/dashboardMock'
 import { isSupabaseConfigured, supabase } from '../lib/supabase'
+import type { AlertRecord, CommandRecord, DashboardDevice, DashboardOverview } from '../types/dashboard'
+
+type ModalPhase = 'question' | 'extended' | 'silenced' | 'awaiting-confirmation' | 'confirmed' | 'failed'
+
+const mockShutoffWillConfirm = true
+
+function LocalDeviceDetail({ deviceId }: { deviceId: string }) {
+  const [device, setDevice] = useState<DashboardDevice | null>(null)
+  const [overview, setOverview] = useState<DashboardOverview | null>(null)
+  const [alerts, setAlerts] = useState<AlertRecord[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [banner, setBanner] = useState<string | null>(null)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [modalPhase, setModalPhase] = useState<ModalPhase>('question')
+  const [latestCommand, setLatestCommand] = useState<CommandRecord | null>(null)
+  const [commandTimeline, setCommandTimeline] = useState<string[]>([])
+  const timersRef = useRef<number[]>([])
+
+  useEffect(() => {
+    void Promise.all([getDeviceById(deviceId), getDashboardStatus(), getAlerts()]).then(
+      ([dev, ov, al]) => {
+        setDevice(dev)
+        setOverview(ov)
+        setAlerts(al)
+        setIsLoading(false)
+      },
+    )
+    return () => { timersRef.current.forEach((t) => window.clearTimeout(t)) }
+  }, [deviceId])
+
+  async function handleFenceCommand(command: 'FENCE_TURN_ON' | 'FENCE_TURN_OFF' | 'FENCE_TEST_RELAY') {
+    if (!device) return
+    const cmd = await createCommand({ target_device_id: device.id, command_type: command, payload: {}, requested_by: 'home-tablet' })
+    setLatestCommand(cmd)
+    const newPower = command === 'FENCE_TURN_ON' ? 'ON' as const : command === 'FENCE_TURN_OFF' ? 'OFF' as const : device.metadata.charger_power === 'ON' ? 'ON' as const : 'OFF' as const
+    setDevice((d) => d ? { ...d, metadata: { ...d.metadata, charger_power: newPower, relay_feedback: newPower } } : d)
+    setBanner(`Fence command sent: ${command}`)
+  }
+
+  async function handleExtendRuntime() {
+    if (!device) return
+    const cmd = await createCommand({ target_device_id: device.id, command_type: 'WELL_PUMP_EXTEND_RUNTIME', payload: { minutes: 45 }, requested_by: 'home-tablet' })
+    setLatestCommand(cmd)
+    setModalPhase('extended')
+    setBanner('Runtime extended 45 minutes.')
+  }
+
+  async function handleSilenceAlert() {
+    const active = alerts.filter((a) => !a.resolved_at && !a.silenced_until)
+    await Promise.all(active.map((a) => silenceAlert(a.id)))
+    setAlerts((prev) => prev.map((a) =>
+      active.some((aa) => aa.id === a.id)
+        ? { ...a, silenced_until: new Date(Date.now() + 30 * 60_000).toISOString() }
+        : a,
+    ))
+    if (modalOpen) setModalPhase('silenced')
+    setBanner('Alerts silenced for 30 minutes.')
+  }
+
+  async function handleWellPumpShutoff() {
+    if (!device) return
+    timersRef.current.forEach((t) => window.clearTimeout(t))
+    const pending = await createCommand({ target_device_id: device.id, command_type: 'WELL_PUMP_SHUTOFF', payload: { requested_state: 'OFF' }, requested_by: 'home-tablet' })
+    setLatestCommand(pending)
+    setModalPhase('awaiting-confirmation')
+    setCommandTimeline([])
+    setBanner('Shutdown command sent…')
+    const t1 = window.setTimeout(() => {
+      setLatestCommand((c) => c ? { ...c, status: 'sent', sent_at: new Date().toISOString() } : c)
+      setCommandTimeline(['Command received'])
+    }, 1000)
+    const t2 = window.setTimeout(() => {
+      setLatestCommand((c) => c ? { ...c, status: 'acknowledged', acknowledged_at: new Date().toISOString() } : c)
+      setCommandTimeline(['Command received', 'Relay feedback confirmed OFF'])
+    }, 2200)
+    const t3 = window.setTimeout(() => {
+      if (mockShutoffWillConfirm) {
+        setLatestCommand((c) => c ? { ...c, status: 'confirmed', confirmed_at: new Date().toISOString() } : c)
+        setCommandTimeline(['Command received', 'Relay feedback confirmed OFF', 'Pump power disabled'])
+        setModalPhase('confirmed')
+        setBanner('Well pump shutdown confirmed.')
+        const now = new Date().toISOString()
+        setDevice((d) => d ? { ...d, status: 'online', last_seen: now, metadata: { ...d.metadata, runtime: '00 min 00 sec', relay_feedback: 'OFF', alert_state: 'Normal' } } : d)
+      } else {
+        setLatestCommand((c) => c ? { ...c, status: 'failed', failure_reason: 'Timeout' } : c)
+        setModalPhase('failed')
+        setBanner('Command sent, but confirmation was not received.')
+      }
+    }, 3600)
+    timersRef.current = [t1, t2, t3]
+  }
+
+  if (isLoading) {
+    return <div className="panel"><p className="eyebrow">Loading…</p></div>
+  }
+
+  if (!device) {
+    return (
+      <div className="panel">
+        <Link to="/devices" className="back-link">← All Devices</Link>
+        <div className="alert alert--danger">Device not found.</div>
+      </div>
+    )
+  }
+
+  const activeAlerts = alerts.filter((a) => !a.resolved_at && a.device_id === device.id)
+
+  return (
+    <div className="device-detail-page">
+      <div className="device-detail-page__nav">
+        <Link to="/devices" className="back-link">← All Devices</Link>
+      </div>
+      <div className="device-detail-page__header">
+        <p className="eyebrow">{device.type.replace('_', ' ')}</p>
+        <h1 className="device-detail-page__title">{device.name}</h1>
+        {device.location && <p className="muted-copy">{device.location}</p>}
+        <div style={{ marginTop: 6 }}>
+          <StatusPill tone={device.status === 'warning' ? 'warning' : device.status === 'critical' ? 'danger' : device.status === 'offline' ? 'neutral' : 'success'}>
+            {device.status}
+          </StatusPill>
+        </div>
+      </div>
+
+      {banner && <div className="alert alert--info" style={{ marginBottom: 12 }}>{banner}</div>}
+
+      {device.type === 'well_pump' && overview && (
+        <WellPumpCard
+          pumpPower={overview.wellPump.pumpPower}
+          runtime={overview.wellPump.runtime}
+          fieldNode={overview.wellPump.fieldNode}
+          feedback={overview.wellPump.feedback}
+          alertState={overview.wellPump.alertState}
+          latestCommand={latestCommand}
+          onShutOff={() => { setModalPhase('question'); setModalOpen(true) }}
+          onRestart={async () => { setBanner('Restart command sent.') }}
+          onViewDetails={() => { /* already on detail page */ }}
+        />
+      )}
+
+      {device.type === 'fence' && overview && (
+        <FenceControllerCard
+          chargerPower={overview.fenceLine.chargerPower}
+          fieldNode={overview.fenceLine.fieldNode}
+          lastCommand={overview.fenceLine.lastCommand}
+          feedback={overview.fenceLine.feedback}
+          note={overview.fenceLine.verificationNote}
+          latestCommand={latestCommand}
+          onTurnOn={() => void handleFenceCommand('FENCE_TURN_ON')}
+          onTurnOff={() => void handleFenceCommand('FENCE_TURN_OFF')}
+          onTestRelay={() => void handleFenceCommand('FENCE_TEST_RELAY')}
+        />
+      )}
+
+      {device.type === 'freezer' && overview && (
+        <FreezerCard
+          temperature={overview.freezer.temperature}
+          safeRange={overview.freezer.safeRange}
+          node={overview.freezer.node}
+          lastUpdated={overview.freezer.lastUpdatedLabel}
+          alertState={overview.freezer.state}
+          onViewDetails={() => { /* already on detail page */ }}
+        />
+      )}
+
+      {device.type === 'driveway' && overview && (
+        <DrivewayAlarmCard
+          status={overview.drivewayAlarm.status}
+          lastTriggered={overview.drivewayAlarm.lastTriggered}
+          node={overview.drivewayAlarm.node}
+        />
+      )}
+
+      {device.type !== 'well_pump' && device.type !== 'fence' && device.type !== 'freezer' && device.type !== 'driveway' && device.type !== 'weather' && (
+        <div className="compact-card">
+          <p className="eyebrow">Device Info</p>
+          <div className="data-rows">
+            {Object.entries(device.metadata).map(([k, v]) => (
+              <div key={k} className="data-row">
+                <span className="label">{k.replace(/_/g, ' ')}</span>
+                <strong className="value-mono">{String(v ?? '—')}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeAlerts.length > 0 && (
+        <div className="compact-card">
+          <p className="eyebrow">Active Alerts for this Device</p>
+          {activeAlerts.map((a) => (
+            <div key={a.id} className="alert alert--warning" style={{ marginBottom: 8 }}>
+              {a.message}
+              {!a.acknowledged && (
+                <button type="button" className="ghost-button btn-sm" style={{ marginLeft: 12 }}
+                  onClick={() => void acknowledgeAlert(a.id).then(() => setAlerts((prev) => prev.map((al) => al.id === a.id ? { ...al, acknowledged: true } : al)))}
+                >
+                  Acknowledge
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {device.type === 'well_pump' && (
+        <LongRunAlertModal
+          open={modalOpen}
+          phase={modalPhase}
+          command={latestCommand}
+          timeline={commandTimeline}
+          onClose={() => setModalOpen(false)}
+          onExtend={() => void handleExtendRuntime()}
+          onShutOff={() => void handleWellPumpShutoff()}
+          onSilence={() => void handleSilenceAlert()}
+        />
+      )}
+    </div>
+  )
+}
 import type { Device, DeviceCommand, DeviceEvent } from '../types/domain'
 
 export function DeviceDetailPage() {
@@ -175,11 +407,7 @@ export function DeviceDetailPage() {
   }
 
   if (!isSupabaseConfigured) {
-    return (
-      <section className="panel page-section alert alert--warning">
-        Supabase environment values are missing. Configure .env.local before testing device control.
-      </section>
-    )
+    return <LocalDeviceDetail deviceId={deviceId ?? ''} />
   }
 
   if (!deviceId) {
@@ -199,8 +427,8 @@ export function DeviceDetailPage() {
   if (!device) {
     return (
       <section className="panel page-section stack">
-        <Link to="/dashboard" className="back-link">
-          Back to Dashboard
+        <Link to="/devices" className="back-link">
+          Back to Devices
         </Link>
         <div className="alert alert--danger">This device could not be found.</div>
       </section>
@@ -213,8 +441,8 @@ export function DeviceDetailPage() {
   return (
     <section className="stack">
       <header className="panel page-section detail-header">
-        <Link to="/dashboard" className="back-link">
-          Back to Dashboard
+        <Link to="/devices" className="back-link">
+          Back to Devices
         </Link>
         <p className="eyebrow">Device Detail</p>
         <h1>{device.name}</h1>

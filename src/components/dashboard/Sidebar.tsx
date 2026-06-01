@@ -1,16 +1,6 @@
-import {
-  AlertTriangle,
-  Bell,
-  Cloud,
-  Droplets,
-  Home,
-  LayoutDashboard,
-  Settings2,
-  Snowflake,
-  Zap,
-} from 'lucide-react'
+import { Activity, AlertTriangle, Clock, Home, Server, Settings2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink } from 'react-router-dom'
 import { getDashboardStatus } from '../../lib/dashboardMock'
 import type { SystemHealth } from '../../types/dashboard'
 import { StatusPill } from '../StatusPill'
@@ -20,34 +10,14 @@ type SidebarProps = {
   onSignOut: () => Promise<void>
 }
 
-type SidebarNavItem =
-  | {
-      kind: 'route'
-      label: string
-      route: string
-      icon: 'home' | 'settings'
-    }
-  | {
-      kind: 'hash'
-      label: string
-      href: string
-      icon: 'fence' | 'pump' | 'freezer' | 'driveway' | 'weather' | 'alerts' | 'system'
-    }
-
 type SidebarStatus = {
   health: SystemHealth
   lastUpdated: string
 }
 
 function formatHealthLabel(health: SystemHealth) {
-  if (health === 'operational') {
-    return 'All systems operational'
-  }
-
-  if (health === 'alert') {
-    return 'System alert state'
-  }
-
+  if (health === 'operational') return 'All systems operational'
+  if (health === 'alert') return 'System alert state'
   return 'Systems degraded'
 }
 
@@ -60,37 +30,16 @@ function formatLastUpdated(value: string) {
   }).format(new Date(value))
 }
 
-const navItems: SidebarNavItem[] = [
-  { kind: 'route', label: 'Home', route: '/dashboard', icon: 'home' },
-  { kind: 'hash', label: 'Fence Controller', href: '/dashboard#fence-line', icon: 'fence' },
-  { kind: 'hash', label: 'Well Pump', href: '/dashboard#well-pump', icon: 'pump' },
-  { kind: 'hash', label: 'Freezer', href: '/dashboard#freezer', icon: 'freezer' },
-  { kind: 'hash', label: 'Driveway Alarm', href: '/dashboard#driveway-alarm', icon: 'driveway' },
-  { kind: 'hash', label: 'Weather', href: '/dashboard#weather', icon: 'weather' },
-  { kind: 'hash', label: 'Alerts', href: '/dashboard#alerts', icon: 'alerts' },
-  { kind: 'route', label: 'Settings', route: '/settings', icon: 'settings' },
-  { kind: 'hash', label: 'System', href: '/dashboard#system', icon: 'system' },
-]
-
-const NAV_ICONS = {
-  home: Home,
-  fence: Zap,
-  pump: Droplets,
-  freezer: Snowflake,
-  driveway: Bell,
-  weather: Cloud,
-  alerts: AlertTriangle,
-  settings: Settings2,
-  system: LayoutDashboard,
-} as const
-
-function NavIcon({ icon }: { icon: SidebarNavItem['icon'] }) {
-  const Icon = NAV_ICONS[icon]
-  return <Icon size={18} aria-hidden="true" />
-}
+const navItems = [
+  { label: 'Home',     route: '/dashboard', Icon: Home },
+  { label: 'Devices',  route: '/devices',   Icon: Server },
+  { label: 'Alerts',   route: '/alerts',    Icon: AlertTriangle },
+  { label: 'History',  route: '/history',   Icon: Clock },
+  { label: 'Settings', route: '/settings',  Icon: Settings2 },
+  { label: 'System',   route: '/system',    Icon: Activity },
+] as const
 
 export function Sidebar({ localMode, onSignOut }: SidebarProps) {
-  const location = useLocation()
   const [status, setStatus] = useState<SidebarStatus>({
     health: 'degraded',
     lastUpdated: new Date().toISOString(),
@@ -98,34 +47,19 @@ export function Sidebar({ localMode, onSignOut }: SidebarProps) {
 
   useEffect(() => {
     let isActive = true
-
     async function loadStatus() {
       const overview = await getDashboardStatus()
-
       if (isActive) {
-        setStatus({
-          health: overview.systemHealth,
-          lastUpdated: overview.lastUpdated,
-        })
+        setStatus({ health: overview.systemHealth, lastUpdated: overview.lastUpdated })
       }
     }
-
     void loadStatus()
-
-    return () => {
-      isActive = false
-    }
+    return () => { isActive = false }
   }, [])
 
   const healthTone = useMemo(() => {
-    if (status.health === 'operational') {
-      return 'success' as const
-    }
-
-    if (status.health === 'alert') {
-      return 'danger' as const
-    }
-
+    if (status.health === 'operational') return 'success' as const
+    if (status.health === 'alert') return 'danger' as const
     return 'warning' as const
   }, [status.health])
 
@@ -138,37 +72,19 @@ export function Sidebar({ localMode, onSignOut }: SidebarProps) {
       </div>
 
       <nav className="sidebar__nav" aria-label="Primary">
-        {navItems.map((item) => {
-          if (item.kind === 'route') {
-            const isRouteActive =
-              item.icon === 'home'
-                ? location.pathname === '/dashboard' && location.hash === ''
-                : location.pathname === item.route
-            return (
-              <NavLink
-                key={item.label}
-                to={item.route}
-                className={() => `sidebar__link${isRouteActive ? ' active' : ''}`}
-              >
-                <span className="sidebar__link-icon">
-                  <NavIcon icon={item.icon} />
-                </span>
-                <span>{item.label}</span>
-              </NavLink>
-            )
-          }
-
-          const isActive = location.pathname === '/dashboard' && location.hash === item.href.replace('/dashboard', '')
-
-          return (
-            <a key={item.label} href={item.href} className={`sidebar__link${isActive ? ' active' : ''}`}>
-              <span className="sidebar__link-icon">
-                <NavIcon icon={item.icon} />
-              </span>
-              <span>{item.label}</span>
-            </a>
-          )
-        })}
+        {navItems.map(({ label, route, Icon }) => (
+          <NavLink
+            key={route}
+            to={route}
+            end={route === '/dashboard'}
+            className={({ isActive }) => `sidebar__link${isActive ? ' active' : ''}`}
+          >
+            <span className="sidebar__link-icon">
+              <Icon size={16} aria-hidden="true" />
+            </span>
+            <span>{label}</span>
+          </NavLink>
+        ))}
       </nav>
 
       <div className="sidebar__footer">
@@ -183,7 +99,7 @@ export function Sidebar({ localMode, onSignOut }: SidebarProps) {
             <StatusPill tone={localMode ? 'warning' : 'success'}>
               {localMode ? 'Local Test Mode' : 'Authenticated'}
             </StatusPill>
-            <button type="button" className="ghost-button" onClick={() => void onSignOut()}>
+            <button type="button" className="ghost-button btn-sm" onClick={() => void onSignOut()}>
               Sign Out
             </button>
           </div>

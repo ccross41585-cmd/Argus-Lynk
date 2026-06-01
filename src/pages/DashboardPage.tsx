@@ -1,15 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Activity, Bell, Cloud, Cpu, Droplets, Server, Snowflake, ToggleRight, Zap } from 'lucide-react'
 import { AlertsPanel } from '../components/dashboard/AlertsPanel'
 import { DashboardHeader } from '../components/dashboard/DashboardHeader'
-import { DrivewayAlarmCard } from '../components/dashboard/DrivewayAlarmCard'
-import { FenceControllerCard } from '../components/dashboard/FenceControllerCard'
-import { FreezerCard } from '../components/dashboard/FreezerCard'
 import { LongRunAlertModal } from '../components/dashboard/LongRunAlertModal'
 import { QuickActionsPanel } from '../components/dashboard/QuickActionsPanel'
 import { StatusCard, type StatusCardIcon } from '../components/dashboard/StatusCard'
 import { CONDITION_ICON } from '../components/dashboard/WeatherCard'
-import { WeatherCard } from '../components/dashboard/WeatherCard'
-import { WellPumpCard } from '../components/dashboard/WellPumpCard'
+import { StatusPill } from '../components/StatusPill'
 import {
   acknowledgeAlert,
   createCommand,
@@ -21,7 +19,13 @@ import {
 import { supabase } from '../lib/supabase'
 import { loadUserProfile } from '../lib/userProfile'
 import { fetchWeather, type LiveWeather } from '../lib/weather'
-import type { AlertRecord, CommandRecord, DashboardDevice, DashboardOverview, DashboardTone } from '../types/dashboard'
+import type {
+  AlertRecord,
+  CommandRecord,
+  DashboardDevice,
+  DashboardOverview,
+  DashboardTone,
+} from '../types/dashboard'
 
 const mockShutoffWillConfirm = true
 
@@ -33,38 +37,53 @@ type BannerState = {
 }
 
 function formatClock(value: Date) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(value)
-}
-
-function formatUpdatedAt(value: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(new Date(value))
+  return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(value)
 }
 
 function cardTone(status: string): DashboardTone {
-  if (status === 'critical' || status === 'Alert' || status === 'Offline' || status === 'Node Offline') {
-    return 'danger'
-  }
-
-  if (status === 'warning' || status === 'Warning' || status === 'Long Run Alert') {
-    return 'warning'
-  }
-
-  if (status === 'Motion Detected' || status === 'Normal') {
-    return 'info'
-  }
-
+  if (status === 'critical' || status === 'Alert' || status === 'Offline' || status === 'Node Offline') return 'danger'
+  if (status === 'warning' || status === 'Warning' || status === 'Long Run Alert') return 'warning'
+  if (status === 'Motion Detected' || status === 'Normal') return 'info'
   return 'success'
 }
 
+function deviceStatusTone(status: string): DashboardTone {
+  if (status === 'critical') return 'danger'
+  if (status === 'warning') return 'warning'
+  if (status === 'offline') return 'neutral'
+  if (status === 'online') return 'success'
+  return 'info'
+}
+
+function getKeyMetric(device: DashboardDevice): string {
+  const m = device.metadata
+  switch (device.type) {
+    case 'fence':     return `Charger ${String(m.charger_power ?? 'â€”')}`
+    case 'well_pump': return m.alert_state && m.alert_state !== 'Normal'
+                        ? String(m.alert_state)
+                        : `Runtime ${String(m.runtime ?? 'â€”')}`
+    case 'freezer':   return String(m.temperature ?? 'â€”')
+    case 'weather':   return `${String(m.temperature ?? 'â€”')}${m.summary ? ' Â· ' + String(m.summary) : ''}`
+    case 'driveway':  return String(m.status ?? 'â€”')
+    case 'gateway':   return `${String(m.nodes_online ?? 0)} nodes online`
+    default:          return 'â€”'
+  }
+}
+
+const DEVICE_ICONS: Record<string, React.ElementType> = {
+  gateway:     Server,
+  fence:       Zap,
+  well_pump:   Droplets,
+  freezer:     Snowflake,
+  weather:     Cloud,
+  driveway:    Bell,
+  relay_node:  ToggleRight,
+  sensor_node: Activity,
+  custom:      Cpu,
+}
+
 export function DashboardPage() {
+  const navigate = useNavigate()
   const [overview, setOverview] = useState<DashboardOverview | null>(null)
   const [devices, setDevices] = useState<DashboardDevice[]>([])
   const [alerts, setAlerts] = useState<AlertRecord[]>([])
@@ -78,10 +97,8 @@ export function DashboardPage() {
   const [liveWeather, setLiveWeather] = useState<LiveWeather | null>(null)
   const timersRef = useRef<number[]>([])
 
-  // Live weather from Open-Meteo using stored user profile coords
   useEffect(() => {
     let isActive = true
-
     async function loadWeather() {
       try {
         const userId = (await supabase?.auth.getUser())?.data?.user?.id
@@ -90,79 +107,68 @@ export function DashboardPage() {
         if (!profile?.latitude || !profile?.longitude) return
         const weather = await fetchWeather(profile.latitude, profile.longitude)
         if (isActive) setLiveWeather(weather)
-      } catch {
-        // silent — falls back to mock weather text
-      }
+      } catch { /* silent */ }
     }
-
     void loadWeather()
-    // Refresh every 15 minutes
-    const weatherInterval = window.setInterval(() => { void loadWeather() }, 15 * 60 * 1000)
-
-    return () => {
-      isActive = false
-      window.clearInterval(weatherInterval)
-    }
+    const interval = window.setInterval(() => { void loadWeather() }, 15 * 60 * 1000)
+    return () => { isActive = false; window.clearInterval(interval) }
   }, [])
 
   useEffect(() => {
-    document.title = 'Argus Lynk | Home Overview'
+    document.title = 'Argus Lynk | Home'
   }, [])
 
   useEffect(() => {
-    const clockId = window.setInterval(() => {
-      setCurrentTime(new Date())
-    }, 1000)
-
-    return () => {
-      window.clearInterval(clockId)
-    }
+    const id = window.setInterval(() => setCurrentTime(new Date()), 1000)
+    return () => window.clearInterval(id)
   }, [])
 
   useEffect(() => {
     let isActive = true
-
-    async function loadDashboard() {
+    async function load() {
       const [nextOverview, nextDevices, nextAlerts] = await Promise.all([
-        getDashboardStatus(),
-        getDevices(),
-        getAlerts(),
+        getDashboardStatus(), getDevices(), getAlerts(),
       ])
-
-      if (!isActive) {
-        return
-      }
-
+      if (!isActive) return
       setOverview(nextOverview)
       setDevices(nextDevices)
       setAlerts(nextAlerts)
       setIsLoading(false)
     }
-
-    void loadDashboard()
-
+    void load()
     return () => {
       isActive = false
-      timersRef.current.forEach((timer) => window.clearTimeout(timer))
+      timersRef.current.forEach((t) => window.clearTimeout(t))
     }
   }, [])
 
-  const activeAlerts = useMemo(() => alerts.filter((alert) => !alert.resolved_at), [alerts])
+  const activeAlerts = useMemo(() => alerts.filter((a) => !a.resolved_at), [alerts])
+
+  const priorityDevices = useMemo(() => {
+    return devices
+      .filter((d) => d.type !== 'gateway' && d.enabled !== false)
+      .sort((a, b) => {
+        const rank = (s: string) => s === 'critical' ? 0 : s === 'warning' ? 1 : 2
+        const diff = rank(a.status) - rank(b.status)
+        if (diff !== 0) return diff
+        if (a.pinned && !b.pinned) return -1
+        if (!a.pinned && b.pinned) return 1
+        return (a.sort_order ?? 99) - (b.sort_order ?? 99)
+      })
+      .slice(0, 6)
+  }, [devices])
 
   const nodesOnlineText = useMemo(() => {
-    const onlineCount = devices.filter((device) => device.status !== 'offline' && device.status !== 'critical').length
-    return `${onlineCount}/${devices.length}`
+    const n = devices.filter((d) => d.status !== 'offline' && d.status !== 'critical').length
+    return `${n}/${devices.length}`
   }, [devices])
 
   const summaryCards = useMemo(() => {
-    if (!overview) {
-      return []
-    }
-
+    if (!overview) return []
     return [
       {
         icon: 'fence' as StatusCardIcon,
-        label: 'Fence Status',
+        label: 'Fence',
         status: overview.fenceLine.chargerPower === 'ON' ? 'Secure' : 'Off',
         detail: overview.fenceLine.feedback,
         tone: overview.fenceLine.chargerPower === 'ON' ? ('success' as const) : ('neutral' as const),
@@ -183,294 +189,128 @@ export function DashboardPage() {
       },
       {
         icon: 'driveway' as StatusCardIcon,
-        label: 'Driveway Alarm',
+        label: 'Driveway',
         status: overview.drivewayAlarm.status === 'Clear' ? 'Clear' : 'Alert',
-        detail: `Last triggered ${overview.drivewayAlarm.lastTriggered}`,
+        detail: `Last trig ${overview.drivewayAlarm.lastTriggered}`,
         tone: cardTone(overview.drivewayAlarm.status),
       },
       {
         icon: 'weather' as StatusCardIcon,
         label: 'Weather',
-        status: liveWeather ? `${liveWeather.temperatureF}°F` : overview.weather.temperature,
+        status: liveWeather ? `${liveWeather.temperatureF}Â°F` : overview.weather.temperature,
         detail: liveWeather?.summary ?? overview.weather.summary,
         tone: 'success' as const,
         customIcon: liveWeather?.condition ? CONDITION_ICON[liveWeather.condition] : undefined,
       },
       {
         icon: 'nodes' as StatusCardIcon,
-        label: 'Nodes Online',
+        label: 'Nodes',
         status: nodesOnlineText,
-        detail: 'All field nodes reporting in.',
+        detail: 'Field nodes reporting',
         tone: 'success' as const,
       },
     ]
   }, [nodesOnlineText, overview, liveWeather])
 
   function clearCommandTimers() {
-    timersRef.current.forEach((timer) => window.clearTimeout(timer))
+    timersRef.current.forEach((t) => window.clearTimeout(t))
     timersRef.current = []
   }
 
   function setWellPumpResolved() {
     const now = new Date().toISOString()
-
-    setDevices((currentDevices) =>
-      currentDevices.map((device) => {
-        if (device.type !== 'well_pump') {
-          return device
-        }
-
-        return {
-          ...device,
-          status: 'online',
-          last_seen: now,
-          metadata: {
-            ...device.metadata,
-            runtime: '00 min 00 sec',
-            relay_feedback: 'OFF',
-            alert_state: 'Normal',
-          },
-        }
+    setDevices((prev) =>
+      prev.map((d) => d.type !== 'well_pump' ? d : {
+        ...d, status: 'online' as const, last_seen: now,
+        metadata: { ...d.metadata, runtime: '00 min 00 sec', relay_feedback: 'OFF', alert_state: 'Normal' },
       }),
     )
-
-    setAlerts((currentAlerts) =>
-      currentAlerts.map((alert) => {
-        if (alert.type !== 'well_pump_long_runtime' || alert.resolved_at) {
-          return alert
-        }
-
-        return {
-          ...alert,
-          acknowledged: true,
-          resolved_at: now,
-        }
+    setAlerts((prev) =>
+      prev.map((a) => a.type !== 'well_pump_long_runtime' || a.resolved_at ? a : {
+        ...a, acknowledged: true, resolved_at: now,
       }),
     )
-
-    setOverview((current) =>
-      current
-        ? {
-            ...current,
-            lastUpdated: now,
-            wellPump: {
-              ...current.wellPump,
-              pumpPower: 'OFF',
-              runtime: '00 min 00 sec',
-              feedback: 'Contactor confirmed OFF',
-              alertState: 'Normal',
-            },
-            system: {
-              ...current.system,
-              awaitingConfirmations: 0,
-              queueDepth: 1,
-              lastCommand: 'Well pump shutoff confirmed by field feedback.',
-            },
-          }
-        : current,
-    )
-  }
-
-  async function openLongRunWorkflow() {
-    setModalPhase('question')
-    setCommandTimeline([])
-    setModalOpen(true)
+    setOverview((cur) => cur ? {
+      ...cur, lastUpdated: now,
+      wellPump: { ...cur.wellPump, pumpPower: 'OFF', runtime: '00 min 00 sec', feedback: 'Contactor confirmed OFF', alertState: 'Normal' },
+      system: { ...cur.system, awaitingConfirmations: 0, queueDepth: 1, lastCommand: 'Well pump shutoff confirmed.' },
+    } : cur)
   }
 
   async function handleExtendRuntime() {
-    const pumpDevice = devices.find((device) => device.type === 'well_pump')
-    if (!pumpDevice) {
-      return
-    }
-
-    const command = await createCommand({
-      target_device_id: pumpDevice.id,
-      command_type: 'WELL_PUMP_EXTEND_RUNTIME',
-      payload: { minutes: 45 },
-      requested_by: 'home-tablet',
-    })
-
-    setLatestCommand(command)
+    const pump = devices.find((d) => d.type === 'well_pump')
+    if (!pump) return
+    const cmd = await createCommand({ target_device_id: pump.id, command_type: 'WELL_PUMP_EXTEND_RUNTIME', payload: { minutes: 45 }, requested_by: 'home-tablet' })
+    setLatestCommand(cmd)
     setModalPhase('extended')
-    setBanner({
-      tone: 'info',
-      message: 'Operator marked water usage as expected. Runtime alert timer was extended.',
-    })
+    setBanner({ tone: 'info', message: 'Runtime extended 45 minutes. Alert timer reset.' })
   }
 
   async function handleSilenceAlert() {
-    const longRunAlert = alerts.find((alert) => alert.type === 'well_pump_long_runtime' && !alert.resolved_at)
-    if (!longRunAlert) {
-      return
-    }
-
-    await silenceAlert(longRunAlert.id)
-    setAlerts((currentAlerts) =>
-      currentAlerts.map((alert) =>
-        alert.id === longRunAlert.id
-          ? { ...alert, silenced_until: new Date(Date.now() + 30 * 60_000).toISOString() }
-          : alert,
-      ),
-    )
-    setModalPhase('silenced')
-    setBanner({ tone: 'warning', message: 'Long-run alert silenced for 30 minutes. Pump remains active.' })
+    const active = alerts.filter((a) => !a.resolved_at && !a.silenced_until)
+    await Promise.all(active.map((a) => silenceAlert(a.id)))
+    setAlerts((prev) => prev.map((a) =>
+      active.some((aa) => aa.id === a.id)
+        ? { ...a, silenced_until: new Date(Date.now() + 30 * 60_000).toISOString() }
+        : a,
+    ))
+    if (modalOpen) setModalPhase('silenced')
+    setBanner({ tone: 'warning', message: 'Alerts silenced for 30 minutes.' })
   }
 
   async function handleWellPumpShutoff() {
-    const pumpDevice = devices.find((device) => device.type === 'well_pump')
-    if (!pumpDevice) {
-      return
-    }
-
+    const pump = devices.find((d) => d.type === 'well_pump')
+    if (!pump) return
     clearCommandTimers()
-
-    const pendingCommand = await createCommand({
-      target_device_id: pumpDevice.id,
-      command_type: 'WELL_PUMP_SHUTOFF',
-      payload: { requested_state: 'OFF' },
-      requested_by: 'home-tablet',
-    })
-
-    setLatestCommand(pendingCommand)
+    const pending = await createCommand({ target_device_id: pump.id, command_type: 'WELL_PUMP_SHUTOFF', payload: { requested_state: 'OFF' }, requested_by: 'home-tablet' })
+    setLatestCommand(pending)
     setModalPhase('awaiting-confirmation')
     setCommandTimeline([])
     setBanner({ tone: 'warning', message: 'Shutdown command sent. Waiting for field node confirmation...' })
 
-    const sentTimer = window.setTimeout(() => {
-      setLatestCommand((current) =>
-        current
-          ? {
-              ...current,
-              status: 'sent',
-              sent_at: new Date().toISOString(),
-            }
-          : current,
-      )
+    const t1 = window.setTimeout(() => {
+      setLatestCommand((c) => c ? { ...c, status: 'sent', sent_at: new Date().toISOString() } : c)
       setCommandTimeline(['Command received'])
     }, 1000)
-
-    const acknowledgedTimer = window.setTimeout(() => {
-      setLatestCommand((current) =>
-        current
-          ? {
-              ...current,
-              status: 'acknowledged',
-              acknowledged_at: new Date().toISOString(),
-            }
-          : current,
-      )
+    const t2 = window.setTimeout(() => {
+      setLatestCommand((c) => c ? { ...c, status: 'acknowledged', acknowledged_at: new Date().toISOString() } : c)
       setCommandTimeline(['Command received', 'Relay/contact feedback confirmed OFF'])
     }, 2200)
-
-    const finalizeTimer = window.setTimeout(() => {
+    const t3 = window.setTimeout(() => {
       if (mockShutoffWillConfirm) {
-        setLatestCommand((current) =>
-          current
-            ? {
-                ...current,
-                status: 'confirmed',
-                confirmed_at: new Date().toISOString(),
-              }
-            : current,
-        )
-        setCommandTimeline([
-          'Command received',
-          'Relay/contact feedback confirmed OFF',
-          'Pump power disabled',
-        ])
+        setLatestCommand((c) => c ? { ...c, status: 'confirmed', confirmed_at: new Date().toISOString() } : c)
+        setCommandTimeline(['Command received', 'Relay/contact feedback confirmed OFF', 'Pump power disabled'])
         setModalPhase('confirmed')
         setBanner({ tone: 'success', message: 'Well pump shutdown confirmed by field feedback.' })
         setWellPumpResolved()
-        return
+      } else {
+        setLatestCommand((c) => c ? { ...c, status: 'failed', failure_reason: 'Field confirmation timeout' } : c)
+        setModalPhase('failed')
+        setBanner({ tone: 'danger', message: 'Command sent, but shutdown confirmation was not received.' })
       }
-
-      setLatestCommand((current) =>
-        current
-          ? {
-              ...current,
-              status: 'failed',
-              failure_reason: 'Field confirmation timeout',
-            }
-          : current,
-      )
-      setModalPhase('failed')
-      setBanner({ tone: 'danger', message: 'Command sent, but shutdown confirmation was not received.' })
     }, 3600)
-
-    timersRef.current = [sentTimer, acknowledgedTimer, finalizeTimer]
-  }
-
-  async function handleRestartWellPump() {
-    const pumpDevice = devices.find((device) => device.type === 'well_pump')
-    if (!pumpDevice) {
-      return
-    }
-
-    const command = await createCommand({
-      target_device_id: pumpDevice.id,
-      command_type: 'WELL_PUMP_RESTART',
-      payload: { requested_state: 'ON' },
-      requested_by: 'home-tablet',
-    })
-
-    setLatestCommand(command)
-    setBanner({ tone: 'info', message: 'Well pump restart command queued for the home base gateway.' })
-  }
-
-  async function handleFenceCommand(commandType: 'FENCE_TURN_ON' | 'FENCE_TURN_OFF' | 'FENCE_TEST_RELAY') {
-    const fenceDevice = devices.find((device) => device.type === 'fence')
-    if (!fenceDevice) {
-      return
-    }
-
-    const command = await createCommand({
-      target_device_id: fenceDevice.id,
-      command_type: commandType,
-      payload: {
-        requested_state:
-          commandType === 'FENCE_TEST_RELAY' ? 'TEST' : commandType === 'FENCE_TURN_ON' ? 'ON' : 'OFF',
-      },
-      requested_by: 'home-tablet',
-    })
-
-    setLatestCommand(command)
-    setOverview((current) =>
-      current
-        ? {
-            ...current,
-            fenceLine: {
-              ...current.fenceLine,
-              lastCommand:
-                commandType === 'FENCE_TEST_RELAY' ? 'TEST' : commandType === 'FENCE_TURN_ON' ? 'ON' : 'OFF',
-            },
-          }
-        : current,
-    )
-    setBanner({ tone: 'info', message: 'Fence controller command queued. Waiting for gateway routing and node feedback.' })
+    timersRef.current = [t1, t2, t3]
   }
 
   async function handleAcknowledgeAlert(alertId: string) {
     await acknowledgeAlert(alertId)
-    setAlerts((currentAlerts) =>
-      currentAlerts.map((alert) => (alert.id === alertId ? { ...alert, acknowledged: true } : alert)),
-    )
-    setBanner({ tone: 'info', message: 'Alert acknowledged for operator review.' })
+    setAlerts((prev) => prev.map((a) => a.id === alertId ? { ...a, acknowledged: true } : a))
+    setBanner({ tone: 'info', message: 'Alert acknowledged.' })
   }
 
   if (isLoading || !overview) {
     return (
-      <section className="dashboard-page">
-        <section className="dashboard-panel loading-panel">
-          <p className="eyebrow">Loading</p>
-          <h2>Building home overview</h2>
-          <p className="section-copy">Fetching mock gateway, field node, and alert data.</p>
-        </section>
+      <section className="dashboard-page dashboard-page--home">
+        <p className="eyebrow">Loading</p>
+        <p className="muted-copy">Building home overviewâ€¦</p>
       </section>
     )
   }
 
+  const nonGatewayDevices = devices.filter((d) => d.type !== 'gateway')
+
   return (
-    <section className="dashboard-page" id="home">
+    <section className="dashboard-page dashboard-page--home">
       <DashboardHeader
         title={overview.title}
         gatewayStatus={overview.gatewayStatus}
@@ -486,83 +326,63 @@ export function DashboardPage() {
         ))}
       </section>
 
-      <section className="content-grid">
-        {/* Left column: primary controls */}
-        <div className="content-col content-col--main">
-          <WellPumpCard
-            pumpPower={overview.wellPump.pumpPower}
-            runtime={overview.wellPump.runtime}
-            fieldNode={overview.wellPump.fieldNode}
-            feedback={overview.wellPump.feedback}
-            alertState={overview.wellPump.alertState}
-            latestCommand={latestCommand}
-            onShutOff={() => void openLongRunWorkflow()}
-            onRestart={() => void handleRestartWellPump()}
-            onViewDetails={() => setBanner({ tone: 'info', message: 'Pump detail drill-down can connect to live node history next.' })}
-          />
-
-          <div className="secondary-row">
-            <FreezerCard
-              temperature={overview.freezer.temperature}
-              safeRange={overview.freezer.safeRange}
-              node={overview.freezer.node}
-              lastUpdated={overview.freezer.lastUpdatedLabel}
-              alertState={overview.freezer.state}
-              onViewDetails={() => setBanner({ tone: 'info', message: 'Freezer detail view is ready for live telemetry integration.' })}
-            />
-
-            <WeatherCard
-              temperatureF={liveWeather?.temperatureF}
-              temperatureText={overview.weather.temperature}
-              summary={liveWeather?.summary ?? overview.weather.summary}
-              condition={liveWeather?.condition}
-              isDay={liveWeather?.isDay}
-              windSpeedMph={liveWeather?.windSpeedMph}
-              humidity={liveWeather?.humidity}
-            />
-          </div>
+      <section className="overview-grid">
+        {/* Left: compact device summary tiles */}
+        <div className="device-summary-grid">
+          {priorityDevices.map((device) => {
+            const Icon = DEVICE_ICONS[device.type] ?? Server
+            const tone = deviceStatusTone(device.status)
+            return (
+              <button
+                key={device.id}
+                type="button"
+                className={`device-tile device-tile--${tone}`}
+                onClick={() => void navigate(`/devices/${device.id}`)}
+              >
+                <div className="device-tile__head">
+                  <span className="device-tile__icon-wrap">
+                    <Icon size={14} aria-hidden="true" />
+                  </span>
+                  <span className="device-tile__name">{device.name}</span>
+                  <StatusPill tone={tone}>{device.status}</StatusPill>
+                </div>
+                {device.location && (
+                  <p className="device-tile__location">{device.location}</p>
+                )}
+                <p className="device-tile__metric">{getKeyMetric(device)}</p>
+              </button>
+            )
+          })}
+          {nonGatewayDevices.length > 6 && (
+            <button
+              type="button"
+              className="device-tile device-tile--more"
+              onClick={() => void navigate('/devices')}
+            >
+              <p className="device-tile__metric">+{nonGatewayDevices.length - 6} more</p>
+              <p className="eyebrow">View All Devices</p>
+            </button>
+          )}
         </div>
 
-        {/* Right column: field controls panel */}
+        {/* Right: alerts + quick actions */}
         <aside className="field-controls-panel">
-          <p className="eyebrow field-controls-panel__title">Field Controls</p>
-
-          <FenceControllerCard
-            chargerPower={overview.fenceLine.chargerPower}
-            fieldNode={overview.fenceLine.fieldNode}
-            lastCommand={overview.fenceLine.lastCommand}
-            feedback={overview.fenceLine.feedback}
-            note={overview.fenceLine.verificationNote}
-            latestCommand={latestCommand}
-            onTurnOn={() => void handleFenceCommand('FENCE_TURN_ON')}
-            onTurnOff={() => void handleFenceCommand('FENCE_TURN_OFF')}
-            onTestRelay={() => void handleFenceCommand('FENCE_TEST_RELAY')}
-          />
-
-          <div className="right-divider" />
-
-          <DrivewayAlarmCard
-            status={overview.drivewayAlarm.status}
-            lastTriggered={overview.drivewayAlarm.lastTriggered}
-            node={overview.drivewayAlarm.node}
-          />
-
-          <div className="right-divider" />
-
           <AlertsPanel
             alerts={activeAlerts}
-            onOpenLongRunAlert={() => void openLongRunWorkflow()}
-            onAcknowledge={(alertId) => void handleAcknowledgeAlert(alertId)}
+            onOpenLongRunAlert={() => { setModalPhase('question'); setModalOpen(true) }}
+            onAcknowledge={(id) => void handleAcknowledgeAlert(id)}
           />
-
           <div className="right-divider" />
-
           <QuickActionsPanel
             queueDepth={overview.system.queueDepth}
             awaitingConfirmations={overview.system.awaitingConfirmations}
-            lastCommand={latestCommand ? `${latestCommand.command_type} · ${latestCommand.status}` : overview.system.lastCommand}
+            lastCommand={
+              latestCommand
+                ? `${latestCommand.command_type} Â· ${latestCommand.status}`
+                : overview.system.lastCommand
+            }
             onSilenceAlerts={() => void handleSilenceAlert()}
-            onViewSystemHealth={() => setBanner({ tone: 'info', message: `Last sync ${formatUpdatedAt(overview.lastUpdated)}.` })}
+            onViewSystemHealth={() => void navigate('/system')}
           />
         </aside>
       </section>

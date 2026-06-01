@@ -68,6 +68,9 @@ const devices: DashboardDevice[] = [
     tenant_id: tenantId,
     name: 'Home Base Gateway',
     type: 'gateway',
+    location: 'Main House',
+    enabled: true,
+    sort_order: 0,
     status: 'online',
     last_seen: new Date().toISOString(),
     metadata: { firmware: 'gateway-mvp', uplink: 'wifi', nodes_online: 5 },
@@ -75,8 +78,12 @@ const devices: DashboardDevice[] = [
   {
     id: 'fence-line-1',
     tenant_id: tenantId,
-    name: 'Fence Controller',
+    name: 'North Fence Controller',
     type: 'fence',
+    location: 'North Pasture',
+    enabled: true,
+    sort_order: 1,
+    pinned: true,
     status: 'online',
     last_seen: new Date().toISOString(),
     metadata: { charger_power: 'ON', relay_feedback: 'ON', last_command: 'ON' },
@@ -84,8 +91,12 @@ const devices: DashboardDevice[] = [
   {
     id: 'well-pump-1',
     tenant_id: tenantId,
-    name: 'Well Pump Node',
+    name: 'House Well Pump',
     type: 'well_pump',
+    location: 'Well House',
+    enabled: true,
+    sort_order: 2,
+    pinned: true,
     status: 'warning',
     last_seen: new Date().toISOString(),
     metadata: { runtime: '12 min 47 sec', relay_feedback: 'ON', alert_state: 'Long Run Alert' },
@@ -93,8 +104,11 @@ const devices: DashboardDevice[] = [
   {
     id: 'freezer-1',
     tenant_id: tenantId,
-    name: 'Freezer Monitor',
+    name: 'Shop Freezer',
     type: 'freezer',
+    location: 'Shop Building',
+    enabled: true,
+    sort_order: 3,
     status: 'online',
     last_seen: new Date().toISOString(),
     metadata: { temperature: '34.1°F', safe_range: '32°F to 38°F', updated: '1 min ago' },
@@ -102,8 +116,11 @@ const devices: DashboardDevice[] = [
   {
     id: 'weather-1',
     tenant_id: tenantId,
-    name: 'Weather Station',
+    name: 'Farm Weather Station',
     type: 'weather',
+    location: 'Open Field',
+    enabled: true,
+    sort_order: 4,
     status: 'online',
     last_seen: new Date().toISOString(),
     metadata: { summary: 'Partly Cloudy', temperature: '87°F' },
@@ -111,8 +128,11 @@ const devices: DashboardDevice[] = [
   {
     id: 'driveway-1',
     tenant_id: tenantId,
-    name: 'Driveway Alarm',
+    name: 'Front Gate Alarm',
     type: 'driveway',
+    location: 'Front Entrance',
+    enabled: true,
+    sort_order: 5,
     status: 'online',
     last_seen: new Date().toISOString(),
     metadata: { status: 'Clear', last_triggered: '10:36 AM', battery: null },
@@ -182,6 +202,10 @@ export async function getDashboardStatus() {
 
 export async function getDevices() {
   return cloneValue(devices)
+}
+
+export async function getDeviceById(id: string) {
+  return cloneValue(devices.find((d) => d.id === id) ?? null)
 }
 
 export async function getDeviceStatuses() {

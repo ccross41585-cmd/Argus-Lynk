@@ -1,4 +1,4 @@
-import { Bell, Home, Settings2 } from 'lucide-react'
+import { AlertTriangle, Home, Server, Settings2 } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { Sidebar } from './dashboard/Sidebar'
 
@@ -27,10 +27,20 @@ export function AppLayout({ localMode, onSignOut }: AppLayoutProps) {
           <Home size={22} aria-hidden="true" />
           <span>Home</span>
         </NavLink>
-        <a href="/dashboard#alerts" className="mobile-nav__link">
-          <Bell size={22} aria-hidden="true" />
+        <NavLink
+          to="/devices"
+          className={({ isActive }) => `mobile-nav__link${isActive ? ' active' : ''}`}
+        >
+          <Server size={22} aria-hidden="true" />
+          <span>Devices</span>
+        </NavLink>
+        <NavLink
+          to="/alerts"
+          className={({ isActive }) => `mobile-nav__link${isActive ? ' active' : ''}`}
+        >
+          <AlertTriangle size={22} aria-hidden="true" />
           <span>Alerts</span>
-        </a>
+        </NavLink>
         <NavLink
           to="/settings"
           className={({ isActive }) => `mobile-nav__link${isActive ? ' active' : ''}`}

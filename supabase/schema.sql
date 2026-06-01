@@ -6,8 +6,12 @@ create extension if not exists pgcrypto;
 
 create table if not exists public.devices (
   id uuid primary key default gen_random_uuid(),
+  tenant_id uuid null,
   name text not null,
   type text not null,
+  location text null,
+  enabled boolean not null default true,
+  sort_order int not null default 0,
   gateway_id text null,
   desired_state text null,
   confirmed_state text null,
@@ -15,19 +19,23 @@ create table if not exists public.devices (
   last_seen timestamptz null,
   rssi numeric null,
   battery_voltage numeric null,
+  metadata jsonb null,
   updated_at timestamptz not null default now()
 );
 
 create table if not exists public.device_commands (
   id uuid primary key default gen_random_uuid(),
+  tenant_id uuid null,
   device_id uuid not null references public.devices(id) on delete cascade,
   gateway_id text null,
-  command text not null,
+  command_type text not null,
+  payload jsonb null,
   status text not null default 'pending',
   created_at timestamptz not null default now(),
   sent_at timestamptz null,
   acknowledged_at timestamptz null,
-  error_message text null
+  confirmed_at timestamptz null,
+  failure_reason text null
 );
 
 create table if not exists public.device_events (
@@ -40,6 +48,20 @@ create table if not exists public.device_events (
 
 create index if not exists idx_device_commands_status_created_at
   on public.device_commands (status, created_at desc);
+
+create table if not exists public.alerts (
+  id uuid primary key default gen_random_uuid(),
+  tenant_id uuid null,
+  device_id uuid null references public.devices(id) on delete set null,
+  severity text not null default 'info',       -- info | warning | critical
+  title text not null,
+  message text not null,
+  status text not null default 'active',        -- active | acknowledged | silenced | resolved
+  created_at timestamptz not null default now(),
+  acknowledged_at timestamptz null,
+  silenced_until timestamptz null,
+  resolved_at timestamptz null
+);
 
 create index if not exists idx_devices_gateway_id
   on public.devices (gateway_id);
