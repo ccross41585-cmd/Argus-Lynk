@@ -107,11 +107,6 @@ a {
 .sidebar__logo {
   width: 180px;
   height: 180px;
-  filter:
-    drop-shadow(0 0 14px rgba(147, 213, 108, 0.65))
-    drop-shadow(0 0 32px rgba(147, 213, 108, 0.3))
-    brightness(1.18)
-    saturate(1.35);
 }
 
 .sidebar__brand-wrap {
