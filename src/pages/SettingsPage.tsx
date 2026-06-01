@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  Bell,
+  BellOff,
   CheckCircle2,
   ChevronDown,
   Cpu,
@@ -8,10 +10,20 @@ import {
   Plus,
   Radio,
   Search,
+  VolumeX,
   Wifi,
   WifiOff,
   XCircle,
 } from 'lucide-react'
+import {
+  getNotificationPermission as _getNotificationPermission,
+  isPushSupported,
+  sendTestNotification,
+  sendTestWellPumpAlert,
+  subscribeToPushNotifications,
+  unsubscribeFromPushNotifications,
+  getCurrentPushSubscription,
+} from '../services/pushNotifications'
 import { StatusPill } from '../components/StatusPill'
 import { maskProjectUrl } from '../lib/display'
 import { isSupabaseConfigured, supabase, supabaseUrl } from '../lib/supabase'
@@ -85,6 +97,20 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
   const [connectionMessage, setConnectionMessage] = useState('Checking cloud connection...')
   const [lastSync, setLastSync] = useState<string | null>(null)
   const [queueDepth, setQueueDepth] = useState<number | null>(null)
+
+  // ── Push notification state ────────────────────────────────────────────────
+  const [pushSupported] = useState(() => isPushSupported())
+  const [pushPermission, setPushPermission] = useState<NotificationPermission>(() =>
+    typeof Notification !== 'undefined' ? Notification.permission : 'denied',
+  )
+  const [pushSubscribed, setPushSubscribed] = useState(false)
+  const [pushBusy, setPushBusy] = useState(false)
+  const [pushMessage, setPushMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [lastTestSent, setLastTestSent] = useState<string | null>(null)
+
+  useEffect(() => {
+    void getCurrentPushSubscription().then((sub) => setPushSubscribed(Boolean(sub)))
+  }, [])
 
   const [locationQuery, setLocationQuery] = useState('')
   const [geoResults, setGeoResults] = useState<GeoResult[]>([])
@@ -310,6 +336,174 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
         <button type="button" className="ghost-button" onClick={() => void onSignOut()}>
           {localMode ? 'Exit Local Mode' : 'Sign Out'}
         </button>
+      </section>
+
+      {/* ─ Notifications ──────────────────────────────────────────────────── */}
+      <section className="panel page-section settings-section">
+        <div className="settings-section__header">
+          <div>
+            <p className="eyebrow">Alerts</p>
+            <h2>Notifications</h2>
+          </div>
+        </div>
+
+        {!pushSupported ? (
+          <div className="settings-stat-row">
+            <span className="label">Push Notifications</span>
+            <div>
+              <StatusPill tone="neutral">Unsupported</StatusPill>
+              <p className="muted-copy" style={{ marginTop: 6, fontSize: '0.8rem' }}>
+                Push notifications are not supported in this browser or device.
+                Try Chrome or Edge on desktop, or Chrome for Android.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="settings-stat-row">
+              <span className="label">Push Notifications</span>
+              <StatusPill
+                tone={pushPermission === 'granted' && pushSubscribed ? 'success'
+                  : pushPermission === 'denied' ? 'danger' : 'neutral'}
+              >
+                {pushPermission === 'granted' && pushSubscribed ? 'Enabled'
+                  : pushPermission === 'denied' ? 'Blocked'
+                  : pushPermission === 'granted' ? 'Not Subscribed'
+                  : 'Disabled'}
+              </StatusPill>
+            </div>
+
+            <div className="settings-stat-row">
+              <span className="label">Permission</span>
+              <span className="mono" style={{ fontSize: '0.85rem' }}>
+                {pushPermission === 'granted' ? 'Granted'
+                  : pushPermission === 'denied' ? 'Denied — change in browser site settings'
+                  : 'Not yet requested'}
+              </span>
+            </div>
+
+            {lastTestSent && (
+              <div className="settings-stat-row">
+                <span className="label">Last Test Sent</span>
+                <span className="mono" style={{ fontSize: '0.85rem' }}>{lastTestSent}</span>
+              </div>
+            )}
+
+            {pushMessage && (
+              <div className={`alert alert--${pushMessage.type === 'success' ? 'success' : 'danger'}`}
+                style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, fontSize: '0.85rem' }}>
+                {pushMessage.text}
+              </div>
+            )}
+
+            {pushPermission === 'denied' && (
+              <p className="muted-copy" style={{ fontSize: '0.8rem', marginTop: 4 }}>
+                Notifications are blocked for this site. To re-enable, click the lock icon
+                in the browser address bar → Notifications → Allow, then refresh.
+              </p>
+            )}
+
+            <div className="settings-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 8 }}>
+              {(!pushSubscribed || pushPermission !== 'granted') && pushPermission !== 'denied' && (
+                <button
+                  type="button"
+                  className="action-button"
+                  disabled={pushBusy}
+                  onClick={async () => {
+                    if (!userId) { setPushMessage({ type: 'error', text: 'You must be signed in to enable push notifications.' }); return }
+                    setPushBusy(true)
+                    setPushMessage(null)
+                    const { error } = await subscribeToPushNotifications(userId, 'default-tenant')
+                    if (error) {
+                      setPushMessage({ type: 'error', text: error })
+                    } else {
+                      setPushSubscribed(true)
+                      setPushPermission('granted')
+                      setPushMessage({ type: 'success', text: 'Push notifications enabled for this device.' })
+                    }
+                    setPushBusy(false)
+                  }}
+                >
+                  {pushBusy ? <Loader2 size={14} className="spin" /> : <Bell size={14} />}
+                  Enable Notifications
+                </button>
+              )}
+
+              {pushSubscribed && pushPermission === 'granted' && (
+                <>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={pushBusy}
+                    onClick={async () => {
+                      setPushBusy(true)
+                      setPushMessage(null)
+                      const { error } = await sendTestNotification()
+                      if (error) {
+                        setPushMessage({ type: 'error', text: error })
+                      } else {
+                        setLastTestSent(new Date().toLocaleTimeString())
+                        setPushMessage({ type: 'success', text: 'Test notification sent.' })
+                      }
+                      setPushBusy(false)
+                    }}
+                  >
+                    {pushBusy ? <Loader2 size={14} className="spin" /> : <Bell size={14} />}
+                    Send Test Notification
+                  </button>
+
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={pushBusy}
+                    onClick={async () => {
+                      if (!userId) return
+                      setPushBusy(true)
+                      setPushMessage(null)
+                      const { error } = await unsubscribeFromPushNotifications(userId)
+                      if (error) {
+                        setPushMessage({ type: 'error', text: error })
+                      } else {
+                        setPushSubscribed(false)
+                        setPushMessage({ type: 'success', text: 'This device unsubscribed from notifications.' })
+                      }
+                      setPushBusy(false)
+                    }}
+                  >
+                    <BellOff size={14} />
+                    Disable This Device
+                  </button>
+                </>
+              )}
+            </div>
+
+            {localMode && (
+              <div style={{ borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: 16, marginTop: 8 }}>
+                <p className="eyebrow" style={{ marginBottom: 8 }}>Local Test Mode</p>
+                <button
+                  type="button"
+                  className="ghost-button btn-sm"
+                  disabled={pushBusy || pushPermission !== 'granted'}
+                  onClick={async () => {
+                    setPushBusy(true)
+                    const { error } = await sendTestWellPumpAlert()
+                    if (error) setPushMessage({ type: 'error', text: error })
+                    else { setLastTestSent(new Date().toLocaleTimeString()); setPushMessage({ type: 'success', text: 'Well pump test alert sent.' }) }
+                    setPushBusy(false)
+                  }}
+                >
+                  <VolumeX size={14} />
+                  Trigger Well Pump Alert
+                </button>
+                {pushPermission !== 'granted' && (
+                  <p className="muted-copy" style={{ fontSize: '0.78rem', marginTop: 4 }}>
+                    Enable notifications above before using test buttons.
+                  </p>
+                )}
+              </div>
+            )}
+          </>
+        )}
       </section>
 
       {/* ─ Device Setup ───────────────────────────────────────────────────── */}

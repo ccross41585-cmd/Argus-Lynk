@@ -7,10 +7,15 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      // injectManifest lets us use a custom service worker (src/sw.ts) that
+      // handles both Workbox precaching AND push notification events.
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       registerType: 'autoUpdate',
       includeAssets: ['app-icon.svg', 'app-icon-maskable.svg', 'argus-lynk-logo.png'],
       manifest: {
-        name: 'Argus Lynk Home Base',
+        name: 'Argus Lynk',
         short_name: 'Argus Lynk',
         description: 'Tablet-first home base dashboard for ESP32 LoRa field devices and gateway routing.',
         theme_color: '#182321',
@@ -31,6 +36,10 @@ export default defineConfig({
             purpose: 'maskable',
           },
         ],
+      },
+      // Ensure the SW is compiled from TypeScript properly
+      injectManifest: {
+        globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
       },
     }),
   ],

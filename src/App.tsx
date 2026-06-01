@@ -6,6 +6,7 @@ import { DashboardPage } from './pages/DashboardPage'
 import { DeviceDetailPage } from './pages/DeviceDetailPage'
 import { DevicesPage } from './pages/DevicesPage'
 import { AlertsPage } from './pages/AlertsPage'
+import { AlertDetailPage } from './pages/AlertDetailPage'
 import { HistoryPage } from './pages/HistoryPage'
 import { SystemPage } from './pages/SystemPage'
 import { LoginPage } from './pages/LoginPage'
@@ -124,6 +125,7 @@ function App() {
         <Route path="/devices" element={<DevicesPage />} />
         <Route path="/devices/:deviceId" element={<DeviceDetailPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/alerts/:alertId" element={<AlertDetailPage localMode={localMode} userId={session?.user.id ?? null} />} />
         <Route path="/history" element={<HistoryPage />} />
         <Route path="/system" element={<SystemPage />} />
         <Route

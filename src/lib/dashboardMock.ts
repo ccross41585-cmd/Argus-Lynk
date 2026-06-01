@@ -216,6 +216,10 @@ export async function getAlerts() {
   return cloneValue(alerts)
 }
 
+export async function getAlertById(id: string) {
+  return cloneValue(alerts.find((a) => a.id === id) ?? null)
+}
+
 export async function createCommand(input: CreateCommandInput) {
   const command: CommandRecord = {
     id: `cmd-${commands.length + 1}`,

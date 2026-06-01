@@ -1535,6 +1535,90 @@ details.dev-diagnostics[open] summary .chevron-icon {
   align-items: center;
 }
 
+/* ── Alert Detail Page ───────────────────────────────────── */
+.alert-detail-page {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+  max-width: 680px;
+}
+
+.alert-detail-device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.alert-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.back-link:hover {
+  color: var(--accent);
+}
+
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--danger, #e05252);
+  background: transparent;
+  color: var(--danger, #e05252);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+.danger-button:hover:not(:disabled) {
+  background: rgba(224, 82, 82, 0.12);
+}
+.danger-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* alert feedback banners */
+.alert--success {
+  background: rgba(147, 213, 108, 0.1);
+  border: 1px solid rgba(147, 213, 108, 0.35);
+  color: #93d56c;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.875rem;
+}
+.alert--warning {
+  background: rgba(255, 193, 7, 0.1);
+  border: 1px solid rgba(255, 193, 7, 0.35);
+  color: #ffc107;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.875rem;
+}
+.alert--danger {
+  background: rgba(224, 82, 82, 0.1);
+  border: 1px solid rgba(224, 82, 82, 0.35);
+  color: #e05252;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.875rem;
+}
+
 /* ── History page ─────────────────────────────────────────── */
 .history-page {
   display: grid;

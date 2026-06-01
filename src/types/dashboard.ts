@@ -134,3 +134,38 @@ export interface CreateCommandInput {
   payload: Record<string, string | number | boolean>
   requested_by: string
 }
+
+// ── Push notification types ───────────────────────────────────────────────────
+
+export type PushPermissionState = 'granted' | 'denied' | 'prompt' | 'unsupported'
+
+export interface PushSubscriptionRecord {
+  id: string
+  tenant_id: string
+  user_id: string
+  endpoint: string
+  p256dh: string
+  auth: string
+  device_label: string | null
+  user_agent: string | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
+export interface AlertPreference {
+  id: string
+  tenant_id: string
+  user_id: string
+  alert_type: string
+  push_enabled: boolean
+  in_app_enabled: boolean
+  minimum_severity: AlertSeverity
+  quiet_hours_enabled: boolean
+  quiet_hours_start: string | null
+  quiet_hours_end: string | null
+  created_at: string
+  updated_at: string
+}

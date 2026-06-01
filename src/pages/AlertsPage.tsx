@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { StatusPill } from '../components/StatusPill'
 import { acknowledgeAlert, getAlerts, getDevices, silenceAlert } from '../lib/dashboardMock'
 import type { AlertRecord, AlertSeverity, DashboardDevice, DashboardTone } from '../types/dashboard'
@@ -155,6 +156,9 @@ export function AlertsPage() {
                     Resolved {formatTime(alert.resolved_at)}
                   </span>
                 )}
+                <Link to={`/alerts/${alert.id}`} className="ghost-button btn-sm">
+                  View Detail →
+                </Link>
               </div>
             </div>
           )
