@@ -61,7 +61,7 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
 
   // Contactor feedback may be stored in metadata by a newer gateway build;
   // fall back to the legacy confirmed_state label.
-  const contactorFeedback = (base.contactor_feedback as string | null) ?? confirmed || '—'
+  const contactorFeedback = (base.contactor_feedback as string | null) ?? (confirmed || '—')
 
   return {
     ...base,

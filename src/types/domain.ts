@@ -19,6 +19,7 @@ export interface Device {
   rssi: number | string | null
   battery_voltage: number | string | null
   updated_at: string
+  metadata: Record<string, unknown> | null
 }
 
 export interface DeviceCommand {

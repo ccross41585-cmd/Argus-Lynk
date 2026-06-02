@@ -19,7 +19,6 @@ import {
 import {
   acknowledgeLiveAlert,
   buildOverview,
-  createLiveCommand,
   getLiveDashboard,
   silenceLiveAlert,
   subscribeToDevices,
