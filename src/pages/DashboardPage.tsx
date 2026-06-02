@@ -104,11 +104,10 @@ export function DashboardPage() {
   const [banner, setBanner] = useState<BannerState | null>(null)
   const [currentTime, setCurrentTime] = useState(() => new Date())
   const [liveWeather, setLiveWeather] = useState<LiveWeather | null>(null)
-  const [rearmReminderOpen, setRearmReminderOpen] = useState(false)
   const timersRef = useRef<number[]>([])
   const fencePowerRef = useRef<'ON' | 'OFF' | null>(null)
-  const rearmSuppressedRef = useRef(false)  // user said "Not Now"
-  const rearmCycledRef = useRef(false)       // fence was rearmed after "Not Now"
+  const rearmSuppressedRef = useRef(false)
+  const rearmCycledRef = useRef(false)
   const rearmTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
@@ -219,7 +218,7 @@ export function DashboardPage() {
         // Schedule the reminder for 1 minute of being off
         rearmTimerRef.current = window.setTimeout(() => {
           rearmTimerRef.current = null
-          setRearmReminderOpen(true)
+          void showRearmNotification()
         }, 60_000)
       }
     }
@@ -426,6 +425,52 @@ export function DashboardPage() {
     }
   }
 
+  async function showRearmNotification() {
+    if (!('serviceWorker' in navigator) || Notification.permission !== 'granted') return
+    const reg = await navigator.serviceWorker.getRegistration('/')
+    if (!reg) return
+    await reg.showNotification('Fence Reminder ⚡', {
+      body: 'The fence has been off for 1 minute. Would you like to arm it now?',
+      icon: '/app-icon.svg',
+      badge: '/app-icon.svg',
+      tag: 'argus-fence-rearm',
+      requireInteraction: true,
+      data: { url: '/' },
+      actions: [
+        { action: 'arm-fence', title: 'Arm Now' },
+        { action: 'dismiss-fence', title: 'Not Now' },
+      ],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)
+  }
+
+  // Listen for service worker messages (arm-fence / suppress from notification actions)
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return
+    function onSWMessage(e: MessageEvent) {
+      const msg = e.data as { type: string } | null
+      if (!msg) return
+      if (msg.type === 'FENCE_REARM_SUPPRESS') {
+        rearmSuppressedRef.current = true
+        rearmCycledRef.current = false
+      }
+      if (msg.type === 'FENCE_REARM') {
+        const fence = devices.find((d) => d.type === 'fence')
+        if (!fence) return
+        void (isSupabaseConfigured
+          ? createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'dashboard' })
+              .then(({ error }) => setBanner(error
+                ? { tone: 'danger', message: `Rearm failed: ${error}` }
+                : { tone: 'success', message: 'Fence arm command sent.' }))
+          : createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'home-tablet' })
+              .then(() => setBanner({ tone: 'success', message: 'Fence arm command sent.' }))
+        )
+      }
+    }
+    navigator.serviceWorker.addEventListener('message', onSWMessage)
+    return () => navigator.serviceWorker.removeEventListener('message', onSWMessage)
+  }, [devices])
+
   async function handleAcknowledgeAlert(alertId: string) {
     if (isSupabaseConfigured) {
       await acknowledgeLiveAlert(alertId)
@@ -568,41 +613,6 @@ export function DashboardPage() {
         onShutOff={() => void handleWellPumpShutoff()}
         onSilence={() => void handleSilenceAlert()}
       />
-
-      {rearmReminderOpen && (
-        <div className="modal-backdrop" role="presentation">
-          <section
-            className="modal-card panel"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="rearm-title"
-          >
-            <div className="modal-card__header">
-              <p className="eyebrow">Fence Reminder</p>
-              <h2 id="rearm-title">Arm the Fence?</h2>
-            </div>
-            <p className="modal-card__message">
-              The fence has been off for 1 minute. Would you like to arm it now?
-            </p>
-            <div className="button-row">
-              <button
-                type="button"
-                className="primary-button"
-                onClick={() => void handleRearmYes()}
-              >
-                Arm Now
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={handleRearmNo}
-              >
-                Not Now
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
     </section>
   )
 }

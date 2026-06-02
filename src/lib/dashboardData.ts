@@ -73,7 +73,7 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
 
   return {
     ...base,
-    charger_power:       desired   || '—',
+    charger_power:       confirmed || desired || '—',
     relay_feedback:      confirmed || '—',
     last_command:        desired   || '—',
     contactor_feedback:  contactorFeedback,

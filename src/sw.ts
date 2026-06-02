@@ -74,6 +74,29 @@ self.addEventListener('notificationclick', (event) => {
   const data = event.notification.data as NotificationData
   const action = event.action
 
+  if (action === 'arm-fence') {
+    event.waitUntil(
+      self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clients) => {
+        for (const client of clients) {
+          client.postMessage({ type: 'FENCE_REARM' })
+        }
+        await openOrFocusUrl('/')
+      }),
+    )
+    return
+  }
+
+  if (action === 'dismiss-fence') {
+    event.waitUntil(
+      self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+        for (const client of clients) {
+          client.postMessage({ type: 'FENCE_REARM_SUPPRESS' })
+        }
+      }),
+    )
+    return
+  }
+
   if (action === 'silence' && data?.alertId) {
     // Best-effort background silence; then open the detail page regardless
     const silenceFetch = fetch(`/api/silence-alert?alertId=${encodeURIComponent(data.alertId)}`, {
@@ -104,8 +127,17 @@ self.addEventListener('notificationclick', (event) => {
 
 // ── Notification close ────────────────────────────────────────────────────────
 
-self.addEventListener('notificationclose', (_event) => {
-  // Reserved for future analytics / event logging
+self.addEventListener('notificationclose', (event) => {
+  // Dismissing the fence rearm notification counts as "Not Now"
+  if (event.notification.tag === 'argus-fence-rearm') {
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clients) => {
+        for (const client of clients) {
+          client.postMessage({ type: 'FENCE_REARM_SUPPRESS' })
+        }
+      })
+      .catch(() => { /* best-effort */ })
+  }
 })
 
 // ── Helper: focus existing window or open new one ────────────────────────────
