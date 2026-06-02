@@ -406,7 +406,7 @@ export function DashboardPage() {
     const fence = devices.find((d) => d.type === 'fence')
     if (!fence) return
     if (isSupabaseConfigured) {
-      const { error } = await createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', requested_by: 'dashboard' })
+      const { error } = await createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'dashboard' })
       setBanner(error ? { tone: 'danger', message: `Failed to send ON command: ${error}` } : { tone: 'success', message: 'Fence arm command sent.' })
     } else {
       await createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'home-tablet' })
@@ -418,7 +418,7 @@ export function DashboardPage() {
     const fence = devices.find((d) => d.type === 'fence')
     if (!fence) return
     if (isSupabaseConfigured) {
-      const { error } = await createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_OFF', requested_by: 'dashboard' })
+      const { error } = await createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_OFF', payload: {}, requested_by: 'dashboard' })
       setBanner(error ? { tone: 'danger', message: `Failed to send OFF command: ${error}` } : { tone: 'warning', message: 'Fence disarm command sent.' })
     } else {
       await createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_OFF', payload: {}, requested_by: 'home-tablet' })
@@ -444,6 +444,7 @@ export function DashboardPage() {
       const { error } = await createLiveCommand({
         target_device_id: fence.id,
         command_type: 'FENCE_TURN_ON',
+        payload: {},
         requested_by: 'dashboard',
       })
       setBanner(error
