@@ -42,7 +42,7 @@ SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
 
 // Polling and ACK timing.
-const unsigned long POLL_INTERVAL_MS = 5000;
+const unsigned long POLL_INTERVAL_MS = 2000;
 const unsigned long ACK_TIMEOUT_MS = 3000;
 const size_t RECENT_COMMAND_CACHE_SIZE = 12;
 

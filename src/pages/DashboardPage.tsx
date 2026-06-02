@@ -19,6 +19,7 @@ import {
 import {
   acknowledgeLiveAlert,
   buildOverview,
+  generateContactorAlerts,
   getLiveDashboard,
   silenceLiveAlert,
   subscribeToDevices,
@@ -157,9 +158,12 @@ export function DashboardPage() {
       ? subscribeToDevices((updated) => {
           setDevices((prev) => {
             const idx = prev.findIndex((d) => d.id === updated.id)
-            if (idx === -1) return [...prev, updated]
-            const next = [...prev]
-            next[idx] = updated
+            const next = idx === -1 ? [...prev, updated] : prev.map((d, i) => i === idx ? updated : d)
+            // Regenerate synthetic contactor alerts whenever a device updates
+            setAlerts((prevAlerts) => {
+              const dbAlerts = prevAlerts.filter((a) => !a.id.startsWith('synth-'))
+              return [...generateContactorAlerts(next, dbAlerts), ...dbAlerts]
+            })
             return next
           })
         })
@@ -209,13 +213,27 @@ export function DashboardPage() {
     const hasFreezer  = installedTypes.has('freezer')
     const hasDriveway = installedTypes.has('driveway')
 
+    const fenceDevice = devices.find((d) => d.type === 'fence')
+    const fenceContactor = String(fenceDevice?.metadata.contactor_feedback ?? '').toUpperCase()
+    const fenceTone = ((): DashboardTone => {
+      if (fenceContactor === 'STUCK ON') return 'danger'
+      if (fenceContactor === 'FAILED')   return 'warning'
+      if (overview.fenceLine.chargerPower === 'ON') return 'success'
+      return 'neutral'
+    })()
+    const fenceStatus = (() => {
+      if (fenceContactor === 'STUCK ON') return 'Stuck On'
+      if (fenceContactor === 'FAILED')   return 'Fault'
+      return overview.fenceLine.chargerPower === 'ON' ? 'Secure' : 'Off'
+    })()
+
     const all = [
       hasFence || !isSupabaseConfigured ? {
         icon: 'fence' as StatusCardIcon,
         label: 'Fence',
-        status: overview.fenceLine.chargerPower === 'ON' ? 'Secure' : 'Off',
-        detail: overview.fenceLine.feedback,
-        tone: overview.fenceLine.chargerPower === 'ON' ? ('success' as const) : ('neutral' as const),
+        status: fenceStatus,
+        detail: overview.fenceLine.verificationNote,
+        tone: fenceTone,
       } : null,
       hasWellPump || !isSupabaseConfigured ? {
         icon: 'pump' as StatusCardIcon,
