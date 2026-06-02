@@ -80,6 +80,7 @@ struct AckPacket {
   bool isValid;
   String sequence;
   String confirmedState;
+  String contactorFeedback;
 };
 
 struct TransmitResult {
@@ -389,7 +390,7 @@ bool markCommandAcknowledged(const PendingCommand& command, const String& confir
     return false;
   }
 
-  DynamicJsonDocument deviceBody(256);
+  DynamicJsonDocument deviceBody(512);
   deviceBody["confirmed_state"] = confirmedState;
   deviceBody["online"] = true;
 
@@ -409,6 +410,39 @@ bool markCommandAcknowledged(const PendingCommand& command, const String& confir
   Serial.println(confirmedState);
   drawScreen();
   return true;
+}
+
+bool updateDeviceContactorFeedback(const String& deviceId, const String& contactorFeedback) {
+  if (contactorFeedback.length() == 0) {
+    return true;
+  }
+
+  // Fetch existing metadata first so we can merge without clobbering other fields
+  String fetchUrl = buildApiUrl("devices?id=eq." + deviceId + "&select=metadata");
+  HTTPClient http;
+  http.begin(fetchUrl);
+  http.addHeader("apikey", SUPABASE_ANON_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
+  int fetchStatus = http.GET();
+  String fetchPayload = http.getString();
+  http.end();
+
+  DynamicJsonDocument merged(512);
+  if (fetchStatus >= 200 && fetchStatus < 300) {
+    DynamicJsonDocument fetched(512);
+    if (!deserializeJson(fetched, fetchPayload) && fetched.is<JsonArray>() && fetched[0]["metadata"].is<JsonObject>()) {
+      merged.set(fetched[0]["metadata"].as<JsonObject>());
+    }
+  }
+  merged["contactor_feedback"] = contactorFeedback;
+
+  DynamicJsonDocument patchBody(512);
+  patchBody["metadata"] = merged;
+  String patchPayload;
+  serializeJson(patchBody, patchPayload);
+
+  String patchUrl = buildApiUrl("devices?id=eq." + deviceId);
+  return sendJsonPatch(patchUrl, patchPayload, "PATCH devices contactor feedback");
 }
 
 bool markCommandFailed(const PendingCommand& command, const String& errorMessage) {
@@ -628,6 +662,7 @@ AckPacket waitForAck(const PendingCommand& command) {
     String packetNode = packetPart(packet, 2);
     String packetSequence = packetPart(packet, 3);
     String packetAction = packetPart(packet, 4);
+    String packetContactorFeedback = packetPart(packet, 5);
 
     if (packetType != "ACK") {
       logVerbose("ACK ignored because type is not ACK.");
@@ -662,6 +697,7 @@ AckPacket waitForAck(const PendingCommand& command) {
 
     ack.isValid = true;
     ack.sequence = packetSequence;
+    ack.contactorFeedback = packetContactorFeedback;
     loraOk = true;
     lastRssi = radio.getRSSI();
     lastSnr = radio.getSNR();
@@ -762,6 +798,7 @@ void processPendingCommand(const PendingCommand& command) {
 
   if (ack.isValid) {
     if (markCommandAcknowledged(command, ack.confirmedState)) {
+      updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback);
       rememberCommandId(command.id);
     }
     Serial.println("Finished command processing, returning to polling");

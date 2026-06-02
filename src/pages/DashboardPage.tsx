@@ -16,7 +16,15 @@ import {
   getDevices,
   silenceAlert,
 } from '../lib/dashboardMock'
-import { supabase } from '../lib/supabase'
+import {
+  acknowledgeLiveAlert,
+  buildOverview,
+  createLiveCommand,
+  getLiveDashboard,
+  silenceLiveAlert,
+  subscribeToDevices,
+} from '../lib/dashboardData'
+import { isSupabaseConfigured, supabase } from '../lib/supabase'
 import { loadUserProfile } from '../lib/userProfile'
 import { fetchWeather, type LiveWeather } from '../lib/weather'
 import type {
@@ -126,21 +134,51 @@ export function DashboardPage() {
   useEffect(() => {
     let isActive = true
     async function load() {
-      const [nextOverview, nextDevices, nextAlerts] = await Promise.all([
-        getDashboardStatus(), getDevices(), getAlerts(),
-      ])
-      if (!isActive) return
-      setOverview(nextOverview)
-      setDevices(nextDevices)
-      setAlerts(nextAlerts)
+      if (isSupabaseConfigured) {
+        const { overview: ov, devices: devs, alerts: als } = await getLiveDashboard()
+        if (!isActive) return
+        setOverview(ov)
+        setDevices(devs)
+        setAlerts(als)
+      } else {
+        const [nextOverview, nextDevices, nextAlerts] = await Promise.all([
+          getDashboardStatus(), getDevices(), getAlerts(),
+        ])
+        if (!isActive) return
+        setOverview(nextOverview)
+        setDevices(nextDevices)
+        setAlerts(nextAlerts)
+      }
       setIsLoading(false)
     }
     void load()
+
+    // Live realtime updates when Supabase is configured
+    const unsubscribe = isSupabaseConfigured
+      ? subscribeToDevices((updated) => {
+          setDevices((prev) => {
+            const idx = prev.findIndex((d) => d.id === updated.id)
+            if (idx === -1) return [...prev, updated]
+            const next = [...prev]
+            next[idx] = updated
+            return next
+          })
+        })
+      : () => {}
+
     return () => {
       isActive = false
+      unsubscribe()
       timersRef.current.forEach((t) => window.clearTimeout(t))
     }
   }, [])
+
+  // Rebuild the derived overview whenever devices change (from realtime or initial load).
+  useEffect(() => {
+    if (isSupabaseConfigured && devices.length > 0) {
+      setOverview(buildOverview(devices))
+    }
+  }, [devices])
 
   const activeAlerts = useMemo(() => alerts.filter((a) => !a.resolved_at), [alerts])
 
@@ -165,39 +203,46 @@ export function DashboardPage() {
 
   const summaryCards = useMemo(() => {
     if (!overview) return []
-    return [
-      {
+
+    const installedTypes = new Set(devices.map((d) => d.type))
+    const hasFence    = installedTypes.has('fence')
+    const hasWellPump = installedTypes.has('well_pump')
+    const hasFreezer  = installedTypes.has('freezer')
+    const hasDriveway = installedTypes.has('driveway')
+
+    const all = [
+      hasFence || !isSupabaseConfigured ? {
         icon: 'fence' as StatusCardIcon,
         label: 'Fence',
         status: overview.fenceLine.chargerPower === 'ON' ? 'Secure' : 'Off',
         detail: overview.fenceLine.feedback,
         tone: overview.fenceLine.chargerPower === 'ON' ? ('success' as const) : ('neutral' as const),
-      },
-      {
+      } : null,
+      hasWellPump || !isSupabaseConfigured ? {
         icon: 'pump' as StatusCardIcon,
         label: 'Well Pump',
         status: overview.wellPump.pumpPower === 'ON' ? 'Running' : 'Off',
         detail: `${overview.wellPump.runtime} runtime`,
         tone: overview.wellPump.alertState === 'Long Run Alert' ? ('warning' as const) : ('info' as const),
-      },
-      {
+      } : null,
+      hasFreezer || !isSupabaseConfigured ? {
         icon: 'freezer' as StatusCardIcon,
         label: 'Freezer',
         status: overview.freezer.temperature,
         detail: overview.freezer.state,
         tone: 'info' as const,
-      },
-      {
+      } : null,
+      hasDriveway || !isSupabaseConfigured ? {
         icon: 'driveway' as StatusCardIcon,
         label: 'Driveway',
         status: overview.drivewayAlarm.status === 'Clear' ? 'Clear' : 'Alert',
         detail: `Last trig ${overview.drivewayAlarm.lastTriggered}`,
         tone: cardTone(overview.drivewayAlarm.status),
-      },
+      } : null,
       {
         icon: 'weather' as StatusCardIcon,
         label: 'Weather',
-        status: liveWeather ? `${liveWeather.temperatureF}Â°F` : overview.weather.temperature,
+        status: liveWeather ? `${liveWeather.temperatureF}°F` : overview.weather.temperature,
         detail: liveWeather?.summary ?? overview.weather.summary,
         tone: 'success' as const,
         customIcon: liveWeather?.condition ? CONDITION_ICON[liveWeather.condition] : undefined,
@@ -210,7 +255,9 @@ export function DashboardPage() {
         tone: 'success' as const,
       },
     ]
-  }, [nodesOnlineText, overview, liveWeather])
+
+    return all.filter(Boolean) as NonNullable<typeof all[number]>[]
+  }, [nodesOnlineText, overview, liveWeather, devices])
 
   function clearCommandTimers() {
     timersRef.current.forEach((t) => window.clearTimeout(t))
@@ -248,7 +295,11 @@ export function DashboardPage() {
 
   async function handleSilenceAlert() {
     const active = alerts.filter((a) => !a.resolved_at && !a.silenced_until)
-    await Promise.all(active.map((a) => silenceAlert(a.id)))
+    if (isSupabaseConfigured) {
+      await Promise.all(active.map((a) => silenceLiveAlert(a.id)))
+    } else {
+      await Promise.all(active.map((a) => silenceAlert(a.id)))
+    }
     setAlerts((prev) => prev.map((a) =>
       active.some((aa) => aa.id === a.id)
         ? { ...a, silenced_until: new Date(Date.now() + 30 * 60_000).toISOString() }
@@ -293,7 +344,11 @@ export function DashboardPage() {
   }
 
   async function handleAcknowledgeAlert(alertId: string) {
-    await acknowledgeAlert(alertId)
+    if (isSupabaseConfigured) {
+      await acknowledgeLiveAlert(alertId)
+    } else {
+      await acknowledgeAlert(alertId)
+    }
     setAlerts((prev) => prev.map((a) => a.id === alertId ? { ...a, acknowledged: true } : a))
     setBanner({ tone: 'info', message: 'Alert acknowledged.' })
   }

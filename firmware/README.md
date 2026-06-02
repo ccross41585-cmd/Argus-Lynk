@@ -40,12 +40,26 @@ CMD|farm123|fence1|<sequence>|ON
 CMD|farm123|fence1|<sequence>|OFF
 ```
 
-ACK packet:
+ACK packet (updated — includes contactor feedback field):
 
 ```text
-ACK|farm123|fence1|<sequence>|ON
-ACK|farm123|fence1|<sequence>|OFF
+ACK|farm123|fence1|<sequence>|ON|CONFIRMED
+ACK|farm123|fence1|<sequence>|OFF|OPEN
+ACK|farm123|fence1|<sequence>|ON|FAILED
+ACK|farm123|fence1|<sequence>|OFF|STUCK ON
 ```
+
+The sixth field is the contactor feedback derived from the auxiliary contact block on GPIO34.
+The gateway and remote can parse it by field index; the extra field is additive so older parsers
+that only read the first five fields continue to work.
+
+Supported commands:
+
+| Command  | Effect |
+|----------|--------|
+| `ON`     | Energise relay, cancel any pending auto-rearm timer |
+| `OFF`    | De-energise relay, start 5-minute auto-rearm timer |
+| `STATUS` | No state change — returns current commanded state and feedback |
 
 `<sequence>` is the Supabase `device_commands.id` value.
 
@@ -75,7 +89,20 @@ The gateway sketch drives a 128x64 SSD1306 OLED using the same settings as the w
 
 The OLED is refreshed during boot, after poll cycles, after transmit attempts, after ACK success or failure, and after Supabase updates.
 
-The field node sketch can also drive the same 128x64 SSD1306 OLED to show LoRa status, relay state, last command, ACK state, and the last packet marker while testing command delivery.
+The field node sketch drives the same 128x64 SSD1306 OLED and shows the following layout:
+
+```
+NODE: fence1
+Cmd: ON
+Contactor: CONFIRMED
+Radio: READY
+Last: STATUS
+RSSI:-42 SNR:8.5
+```
+
+`Cmd` is the software-commanded state. `Contactor` is the physical feedback from the auxiliary
+contact block (GPIO34): CONFIRMED, OPEN, FAILED, or STUCK ON. RSSI and SNR are updated from the
+last received LoRa packet.
 
 ## Logging
 

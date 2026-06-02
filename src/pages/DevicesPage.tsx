@@ -2,7 +2,9 @@ import { Activity, Bell, Cloud, Cpu, Droplets, Server, Snowflake, ToggleRight, Z
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { StatusPill } from '../components/StatusPill'
+import { getLiveDevices } from '../lib/dashboardData'
 import { getDevices } from '../lib/dashboardMock'
+import { isSupabaseConfigured } from '../lib/supabase'
 import type { DashboardDevice, DashboardTone } from '../types/dashboard'
 
 const TYPE_LABELS: Record<string, string> = {
@@ -84,7 +86,8 @@ export function DevicesPage() {
 
   useEffect(() => {
     document.title = 'Argus Lynk | Devices'
-    void getDevices().then((data) => {
+    const fetch = isSupabaseConfigured ? getLiveDevices() : getDevices()
+    void fetch.then((data) => {
       setDevices(data.filter((d) => d.type !== 'gateway'))
       setIsLoading(false)
     })

@@ -15,15 +15,22 @@ const String NODE_ID = "fence1";
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
-// Relay wiring. Adjust active level to match your module so boot does not pulse the relay.
-const int RELAY_PIN = 26;
-const int RELAY_ACTIVE_LEVEL = HIGH;
-const int RELAY_IDLE_LEVEL = LOW;
+// Relay wiring. Set RELAY_ACTIVE_LOW true if your module energises on a LOW signal.
+#define RELAY_ACTIVE_LOW false
+const int RELAY_PIN          = 26;
+const int RELAY_ACTIVE_LEVEL = RELAY_ACTIVE_LOW ? LOW  : HIGH;
+const int RELAY_IDLE_LEVEL   = RELAY_ACTIVE_LOW ? HIGH : LOW;
+
+// Auxiliary contactor feedback (dry contact: closed = LOW via INPUT_PULLUP).
+#define CONTACTOR_FEEDBACK_PIN 34
+
+// Auto-rearm delay after an OFF command (milliseconds).
+#define REARM_DELAY_MS 300000UL   // 5 minutes
 
 // Heltec WiFi LoRa 32 V3 / SX1262 pinout.
-#define LORA_NSS 8
+#define LORA_NSS  8
 #define LORA_DIO1 14
-#define LORA_RST 12
+#define LORA_RST  12
 #define LORA_BUSY 13
 
 const float LORA_FREQ = 915.0;
@@ -32,20 +39,50 @@ SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
 
 String lastHandledSequence = "";
-bool relayIsOn = false;
+bool commandedOn = true;          // Default commanded state is ON at boot.
 volatile bool receivedFlag = false;
 bool oledOk = false;
 bool loraOk = false;
-String lastPacketText = "NONE";
+String lastPacketText  = "NONE";
 String lastCommandText = "NONE";
-String lastAckText = "NONE";
-String lastErrorText = "";
+String lastAckText     = "NONE";
+String lastErrorText   = "";
+String lastFeedbackText = "";     // Tracks previous feedback to detect changes.
+float  lastRSSI = 0.0;
+float  lastSNR  = 0.0;
+unsigned long rearmDeadline = 0;  // 0 = no pending rearm.
+
+// ── Contactor feedback ────────────────────────────────────────────────────────
+
+bool contactorIsEngaged() {
+  return digitalRead(CONTACTOR_FEEDBACK_PIN) == LOW;
+}
+
+// Returns the relationship between the commanded state and the physical contactor.
+String contactorFeedback() {
+  bool engaged = contactorIsEngaged();
+  if ( commandedOn &&  engaged) return "CONFIRMED";
+  if ( commandedOn && !engaged) return "FAILED";
+  if (!commandedOn && !engaged) return "OPEN";
+  /* !commandedOn && engaged */  return "STUCK ON";
+}
+
+// Emits a Serial message whenever the feedback state transitions.
+void checkFeedbackChange() {
+  String fb = contactorFeedback();
+  if (fb != lastFeedbackText) {
+    lastFeedbackText = fb;
+    Serial.print("Contactor feedback: ");
+    Serial.println(fb);
+  }
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
 
 String shortText(const String& value, size_t limit) {
   if (value.length() <= limit) {
     return value;
   }
-
   return value.substring(0, limit);
 }
 
@@ -61,21 +98,25 @@ void drawScreen() {
     return;
   }
 
+  String fb = contactorFeedback();
+  char rssiSnr[24];
+  snprintf(rssiSnr, sizeof(rssiSnr), "RSSI:%.0f SNR:%.1f", lastRSSI, lastSNR);
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-  display.println("ARGUS NODE");
-  display.print("LoRa:");
-  display.println(loraOk ? "OK" : "NO");
-  display.print("Relay:");
-  display.println(relayIsOn ? "ON" : "OFF");
-  display.print("Cmd:");
+  display.print("NODE: ");
+  display.println(NODE_ID);
+  display.print("Cmd: ");
+  display.println(commandedOn ? "ON" : "OFF");
+  display.print("Contactor: ");
+  display.println(fb);
+  display.print("Radio: ");
+  display.println(loraOk ? "READY" : "NO");
+  display.print("Last: ");
   display.println(lastCommandText);
-  display.print("Ack:");
-  display.println(lastAckText);
-  display.print("Pkt:");
-  display.println(lastPacketText);
+  display.println(rssiSnr);
   display.display();
 }
 
@@ -137,27 +178,45 @@ String packetPart(const String& packet, int partIndex) {
   return packet.substring(tokenStart, tokenEnd);
 }
 
-String relayStateText() {
-  return readRelayOutputState() ? "ON" : "OFF";
-}
+// ── Relay ─────────────────────────────────────────────────────────────────────
 
-void applyRelayState(bool nextRelayState) {
-  digitalWrite(RELAY_PIN, nextRelayState ? RELAY_ACTIVE_LEVEL : RELAY_IDLE_LEVEL);
-  relayIsOn = readRelayOutputState();
+void applyRelayState(bool nextCommandedOn) {
+  commandedOn = nextCommandedOn;
+  digitalWrite(RELAY_PIN, commandedOn ? RELAY_ACTIVE_LEVEL : RELAY_IDLE_LEVEL);
 
-  if (relayIsOn != nextRelayState) {
+  if (readRelayOutputState() != commandedOn) {
     lastErrorText = "RELAY MISMATCH";
     Serial.println("Relay output verification failed after write.");
   } else {
     lastErrorText = "";
   }
 
+  checkFeedbackChange();
   drawScreen();
 }
 
+void setupRelay() {
+  // Pre-load the active level before switching to OUTPUT so the relay energises
+  // immediately at boot without a glitch (default commanded state is ON).
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LEVEL);
+  pinMode(RELAY_PIN, OUTPUT);
+
+  if (!readRelayOutputState()) {
+    lastErrorText = "RELAY MISMATCH";
+    Serial.println("Relay output verification failed at boot.");
+  }
+
+  Serial.print("Relay initialized. Commanded state: ");
+  Serial.println(commandedOn ? "ON" : "OFF");
+}
+
+// ── LoRa ──────────────────────────────────────────────────────────────────────
+
 void sendAck(const String& sequence) {
-  String packet = "ACK|" + NETWORK_KEY + "|" + NODE_ID + "|" + sequence + "|" + relayStateText();
-  lastAckText = relayStateText();
+  String fb = contactorFeedback();
+  String packet = "ACK|" + NETWORK_KEY + "|" + NODE_ID + "|" + sequence
+                  + "|" + (commandedOn ? "ON" : "OFF") + "|" + fb;
+  lastAckText = commandedOn ? "ON" : "OFF";
   drawScreen();
 
   Serial.print("Sending ACK: ");
@@ -208,24 +267,17 @@ void initializeLoRa() {
   Serial.println("SX1262 radio ready.");
 }
 
-void setupRelay() {
-  // Set the idle level before switching the pin to OUTPUT to avoid relay glitches.
-  digitalWrite(RELAY_PIN, RELAY_IDLE_LEVEL);
-  pinMode(RELAY_PIN, OUTPUT);
-  relayIsOn = readRelayOutputState();
-
-  Serial.print("Relay initialized. Current state: ");
-  Serial.println(relayStateText());
-}
+// ── Command handling ──────────────────────────────────────────────────────────
 
 void handleCommandPacket(const String& packet) {
   String packetType = packetPart(packet, 0);
-  String packetKey = packetPart(packet, 1);
+  String packetKey  = packetPart(packet, 1);
   String packetNode = packetPart(packet, 2);
-  String sequence = packetPart(packet, 3);
-  String command = packetPart(packet, 4);
+  String sequence   = packetPart(packet, 3);
+  String command    = packetPart(packet, 4);
 
-  if (packetType != "CMD" || packetKey.length() == 0 || packetNode.length() == 0 || sequence.length() == 0 || command.length() == 0) {
+  if (packetType != "CMD" || packetKey.length() == 0 || packetNode.length() == 0
+      || sequence.length() == 0 || command.length() == 0) {
     if (packetType == "ACK") {
       lastPacketText = "ACK SEEN";
       drawScreen();
@@ -263,7 +315,6 @@ void handleCommandPacket(const String& packet) {
   if (sequence == lastHandledSequence) {
     lastPacketText = "DUP " + shortText(sequence, 8);
     lastCommandText = command;
-    lastAckText = relayStateText();
     drawScreen();
     Serial.printf("Duplicate command received again: %s\n", sequence.c_str());
     sendAck(sequence);
@@ -271,12 +322,16 @@ void handleCommandPacket(const String& packet) {
   }
 
   if (command == "ON") {
+    rearmDeadline = 0;
     applyRelayState(true);
   } else if (command == "OFF") {
+    rearmDeadline = millis() + REARM_DELAY_MS;
     applyRelayState(false);
+  } else if (command == "STATUS") {
+    // No state change — ACK with current commanded state and contactor feedback.
   } else {
     lastPacketText = "BAD CMD";
-    lastErrorText = command;
+    lastErrorText  = command;
     drawScreen();
     Serial.printf("Unsupported command received: %s\n", command.c_str());
     int state = radio.startReceive();
@@ -287,18 +342,22 @@ void handleCommandPacket(const String& packet) {
   }
 
   lastHandledSequence = sequence;
-  lastPacketText = shortText(sequence, 8);
+  lastPacketText  = shortText(sequence, 8);
   lastCommandText = command;
-  lastErrorText = "";
+  lastErrorText   = "";
   drawScreen();
 
-  Serial.print("Applied command ");
+  Serial.print("Handled command ");
   Serial.print(command);
-  Serial.print(". Relay state is now ");
-  Serial.println(relayStateText());
+  Serial.print(". Commanded: ");
+  Serial.print(commandedOn ? "ON" : "OFF");
+  Serial.print(". Contactor: ");
+  Serial.println(contactorFeedback());
 
   sendAck(sequence);
 }
+
+// ── Arduino entry points ──────────────────────────────────────────────────────
 
 void setup() {
   Serial.begin(115200);
@@ -307,8 +366,15 @@ void setup() {
   Serial.println("Argus field node MVP booting...");
 
   setupOLED();
-  drawScreen();
   setupRelay();
+
+  pinMode(CONTACTOR_FEEDBACK_PIN, INPUT_PULLUP);
+  // Seed lastFeedbackText so the first checkFeedbackChange() call is silent.
+  lastFeedbackText = contactorFeedback();
+  Serial.print("Initial contactor feedback: ");
+  Serial.println(lastFeedbackText);
+
+  drawScreen();
   initializeLoRa();
 
   Serial.print("Listening for node: ");
@@ -316,6 +382,19 @@ void setup() {
 }
 
 void loop() {
+  // Auto-rearm: turn fence back ON after the configured delay.
+  // Uses unsigned subtraction so millis() rollover is handled correctly.
+  if (rearmDeadline != 0 && millis() - rearmDeadline < 0x80000000UL) {
+    rearmDeadline = 0;
+    Serial.println("Auto-rearm: turning fence ON.");
+    applyRelayState(true);
+    lastCommandText = "REARM";
+    drawScreen();
+  }
+
+  // Continuous physical feedback monitoring — prints on any transition.
+  checkFeedbackChange();
+
   if (!receivedFlag) {
     delay(25);
     return;
@@ -352,7 +431,8 @@ void loop() {
   packet = trimCopy(packet);
   lastPacketText = shortText(packet, 12);
   loraOk = true;
-  relayIsOn = readRelayOutputState();
+  lastRSSI = radio.getRSSI();
+  lastSNR  = radio.getSNR();
   drawScreen();
   Serial.print("LoRa packet received: ");
   Serial.println(packet);
