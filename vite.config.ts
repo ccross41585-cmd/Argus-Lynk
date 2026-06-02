@@ -13,7 +13,7 @@ export default defineConfig({
       srcDir: 'src',
       filename: 'sw.ts',
       registerType: 'autoUpdate',
-      includeAssets: ['app-icon.png', 'app-icon-maskable.svg', 'argus-lynk-logo.png'],
+      includeAssets: ['app-icon.svg', 'app-icon-maskable.svg'],
       manifest: {
         name: 'Argus Lynk',
         short_name: 'Argus Lynk',
@@ -24,15 +24,15 @@ export default defineConfig({
         start_url: '/',
         icons: [
           {
-            src: 'app-icon.png',
-            sizes: '1024x1536',
-            type: 'image/png',
+            src: 'app-icon.svg',
+            sizes: 'any',
+            type: 'image/svg+xml',
             purpose: 'any',
           },
           {
-            src: 'app-icon.png',
-            sizes: '1024x1536',
-            type: 'image/png',
+            src: 'app-icon-maskable.svg',
+            sizes: 'any',
+            type: 'image/svg+xml',
             purpose: 'maskable',
           },
         ],
