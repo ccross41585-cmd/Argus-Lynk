@@ -481,33 +481,6 @@ export function DashboardPage() {
     setBanner({ tone: 'info', message: 'Alert acknowledged.' })
   }
 
-  async function handleRearmYes() {
-    setRearmReminderOpen(false)
-    const fence = devices.find((d) => d.type === 'fence')
-    if (!fence) return
-    if (isSupabaseConfigured) {
-      const { error } = await createLiveCommand({
-        target_device_id: fence.id,
-        command_type: 'FENCE_TURN_ON',
-        payload: {},
-        requested_by: 'dashboard',
-      })
-      setBanner(error
-        ? { tone: 'danger', message: `Failed to send arm command: ${error}` }
-        : { tone: 'success', message: 'Fence arm command sent.' },
-      )
-    } else {
-      await createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'home-tablet' })
-      setBanner({ tone: 'success', message: 'Fence arm command sent.' })
-    }
-  }
-
-  function handleRearmNo() {
-    setRearmReminderOpen(false)
-    rearmSuppressedRef.current = true
-    rearmCycledRef.current = false
-  }
-
   if (isLoading || !overview) {
     return (
       <section className="dashboard-page dashboard-page--home">
