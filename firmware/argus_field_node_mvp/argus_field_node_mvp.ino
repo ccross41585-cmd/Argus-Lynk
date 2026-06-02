@@ -24,8 +24,7 @@ const int RELAY_IDLE_LEVEL   = RELAY_ACTIVE_LOW ? HIGH : LOW;
 // Auxiliary contactor feedback (dry contact: closed = LOW via INPUT_PULLUP).
 #define CONTACTOR_FEEDBACK_PIN 34
 
-// Auto-rearm delay after an OFF command (milliseconds).
-#define REARM_DELAY_MS 300000UL   // 5 minutes
+// Auto-rearm removed: only gateway commands change relay state.
 
 // Heltec WiFi LoRa 32 V3 / SX1262 pinout.
 #define LORA_NSS  8
@@ -39,7 +38,7 @@ SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
 
 String lastHandledSequence = "";
-bool commandedOn = true;          // Default commanded state is ON at boot.
+bool commandedOn = false;         // Default commanded state is OFF at boot. Wait for a gateway command.
 volatile bool receivedFlag = false;
 bool oledOk = false;
 bool loraOk = false;
@@ -50,7 +49,6 @@ String lastErrorText   = "";
 String lastFeedbackText = "";     // Tracks previous feedback to detect changes.
 float  lastRSSI = 0.0;
 float  lastSNR  = 0.0;
-unsigned long rearmDeadline = 0;  // 0 = no pending rearm.
 
 // ── Contactor feedback ────────────────────────────────────────────────────────
 
@@ -196,12 +194,12 @@ void applyRelayState(bool nextCommandedOn) {
 }
 
 void setupRelay() {
-  // Pre-load the active level before switching to OUTPUT so the relay energises
-  // immediately at boot without a glitch (default commanded state is ON).
-  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LEVEL);
+  // Pre-load the idle level before switching to OUTPUT so the relay stays
+  // de-energised at boot. Wait for a gateway ON command before engaging.
+  digitalWrite(RELAY_PIN, RELAY_IDLE_LEVEL);
   pinMode(RELAY_PIN, OUTPUT);
 
-  if (!readRelayOutputState()) {
+  if (readRelayOutputState() != commandedOn) {
     lastErrorText = "RELAY MISMATCH";
     Serial.println("Relay output verification failed at boot.");
   }
@@ -322,10 +320,8 @@ void handleCommandPacket(const String& packet) {
   }
 
   if (command == "ON") {
-    rearmDeadline = 0;
     applyRelayState(true);
   } else if (command == "OFF") {
-    rearmDeadline = millis() + REARM_DELAY_MS;
     applyRelayState(false);
   } else if (command == "STATUS") {
     // No state change — ACK with current commanded state and contactor feedback.
@@ -382,16 +378,6 @@ void setup() {
 }
 
 void loop() {
-  // Auto-rearm: turn fence back ON after the configured delay.
-  // Uses unsigned subtraction so millis() rollover is handled correctly.
-  if (rearmDeadline != 0 && millis() - rearmDeadline < 0x80000000UL) {
-    rearmDeadline = 0;
-    Serial.println("Auto-rearm: turning fence ON.");
-    applyRelayState(true);
-    lastCommandText = "REARM";
-    drawScreen();
-  }
-
   // Continuous physical feedback monitoring — prints on any transition.
   checkFeedbackChange();
 

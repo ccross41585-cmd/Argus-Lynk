@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { Pencil, X, Check } from 'lucide-react'
 import { DrivewayAlarmCard } from '../components/dashboard/DrivewayAlarmCard'
 import { FenceControllerCard } from '../components/dashboard/FenceControllerCard'
 import { FreezerCard } from '../components/dashboard/FreezerCard'
@@ -251,6 +252,9 @@ export function DeviceDetailPage() {
   const [actionMessage, setActionMessage] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [isSending, setIsSending] = useState(false)
+  const [isEditingName, setIsEditingName] = useState(false)
+  const [editNameValue, setEditNameValue] = useState('')
+  const [isSavingName, setIsSavingName] = useState(false)
 
   useEffect(() => {
     if (!deviceId || !supabase) {
@@ -367,6 +371,34 @@ export function DeviceDetailPage() {
     }
   }, [deviceId])
 
+  function startEditName() {
+    if (!device) return
+    setEditNameValue(device.name)
+    setIsEditingName(true)
+  }
+
+  function cancelEditName() {
+    setIsEditingName(false)
+    setEditNameValue('')
+  }
+
+  async function saveDeviceName() {
+    if (!supabase || !device || !editNameValue.trim()) return
+    setIsSavingName(true)
+    const { error } = await supabase
+      .from('devices')
+      .update({ name: editNameValue.trim() })
+      .eq('id', device.id)
+    setIsSavingName(false)
+    if (error) {
+      setActionError(`Failed to rename device: ${error.message}`)
+    } else {
+      setDevice((d) => d ? { ...d, name: editNameValue.trim() } : d)
+      setActionMessage('Device name updated.')
+    }
+    setIsEditingName(false)
+  }
+
   async function sendCommand(command: 'turn_on' | 'turn_off') {
     if (!supabase || !device) {
       return
@@ -445,7 +477,31 @@ export function DeviceDetailPage() {
           Back to Devices
         </Link>
         <p className="eyebrow">Device Detail</p>
-        <h1>{device.name}</h1>
+        {isEditingName ? (
+          <div className="device-name-edit">
+            <input
+              className="device-name-edit__input"
+              value={editNameValue}
+              onChange={(e) => setEditNameValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') void saveDeviceName(); if (e.key === 'Escape') cancelEditName() }}
+              autoFocus
+              maxLength={64}
+            />
+            <button type="button" className="device-name-edit__btn device-name-edit__btn--save" onClick={() => void saveDeviceName()} disabled={isSavingName} aria-label="Save name">
+              <Check size={16} strokeWidth={2.2} />
+            </button>
+            <button type="button" className="device-name-edit__btn device-name-edit__btn--cancel" onClick={cancelEditName} aria-label="Cancel">
+              <X size={16} strokeWidth={2.2} />
+            </button>
+          </div>
+        ) : (
+          <div className="device-name-display">
+            <h1>{device.name}</h1>
+            <button type="button" className="device-name-edit__trigger" onClick={startEditName} aria-label="Edit device name">
+              <Pencil size={15} strokeWidth={2} />
+            </button>
+          </div>
+        )}
         <p className="section-copy">
           Confirmed state is the physical truth. Desired state only reflects the most recent request.
         </p>

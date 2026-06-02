@@ -258,6 +258,15 @@ a {
   margin: 0;
   text-transform: uppercase;
   font-family: var(--font-display);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dashboard-header__logo-icon {
+  color: var(--accent-strong);
+  filter: drop-shadow(0 0 6px rgba(147, 213, 108, 0.7));
+  flex-shrink: 0;
 }
 
 .dashboard-header__tagline {
@@ -353,6 +362,52 @@ a {
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 14px;
 }
+
+.status-card--controllable {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.status-card__main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.status-card__toggle-row {
+  display: flex;
+  gap: 8px;
+}
+
+.status-card__btn {
+  flex: 1;
+  padding: 7px 0;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s, opacity 0.15s;
+}
+
+.status-card__btn--on {
+  background: rgba(147, 213, 108, 0.15);
+  color: #b5f17f;
+  border-color: rgba(147, 213, 108, 0.35);
+}
+
+.status-card__btn--off {
+  background: rgba(223, 107, 87, 0.15);
+  color: #f08070;
+  border-color: rgba(223, 107, 87, 0.35);
+}
+
+.status-card__btn:hover { filter: brightness(1.25); }
+.status-card__btn:active { filter: brightness(0.85); opacity: 0.9; }
 
 .status-card::before {
   content: '';
@@ -939,6 +994,85 @@ a {
   font-size: 0.8rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+}
+
+/* ── Device name inline edit ──────────────────────────────── */
+.device-name-display {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.device-name-edit__trigger {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+
+.device-name-edit__trigger:hover {
+  color: var(--accent-strong);
+}
+
+.device-name-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.device-name-edit__input {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(147, 213, 108, 0.4);
+  border-radius: 8px;
+  color: var(--text-primary, #e8f5e0);
+  font-size: 1.4rem;
+  font-family: var(--font-display);
+  letter-spacing: 0.03em;
+  padding: 4px 10px;
+  flex: 1;
+  min-width: 0;
+  outline: none;
+}
+
+.device-name-edit__input:focus {
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 2px rgba(147, 213, 108, 0.15);
+}
+
+.device-name-edit__btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  padding: 5px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.device-name-edit__btn--save {
+  color: #b5f17f;
+  border-color: rgba(147, 213, 108, 0.3);
+}
+
+.device-name-edit__btn--save:hover {
+  background: rgba(147, 213, 108, 0.12);
+}
+
+.device-name-edit__btn--cancel {
+  color: #f08070;
+  border-color: rgba(223, 107, 87, 0.3);
+}
+
+.device-name-edit__btn--cancel:hover {
+  background: rgba(223, 107, 87, 0.12);
 }
 
 /* ── Settings location form ───────────────────────────────── */

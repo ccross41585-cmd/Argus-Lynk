@@ -1,14 +1,12 @@
-import { Activity, Clock, Wifi } from 'lucide-react'
+import { Activity, Clock, ShieldCheck, Wifi } from 'lucide-react'
 
 type DashboardHeaderProps = {
-  title: string
   gatewayStatus: 'online' | 'offline'
   networkStrength: 'Strong' | 'Weak' | 'Offline'
   currentTime: string
 }
 
 export function DashboardHeader({
-  title,
   gatewayStatus,
   networkStrength,
   currentTime,
@@ -18,7 +16,11 @@ export function DashboardHeader({
   return (
     <header className="dashboard-header panel">
       <div className="dashboard-header__hero">
-        <h1 className="dashboard-header__title">{title}</h1>
+        <h1 className="dashboard-header__title">
+          Argus
+          <ShieldCheck size={24} strokeWidth={1.8} className="dashboard-header__logo-icon" aria-hidden="true" />
+          Dashboard
+        </h1>
         <p className="dashboard-header__tagline">
           Welcome back. All systems connected.
           <span className={`dashboard-header__dot${gatewayOnline ? ' dashboard-header__dot--online' : ''}`} />

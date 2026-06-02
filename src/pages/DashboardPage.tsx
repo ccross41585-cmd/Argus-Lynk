@@ -19,6 +19,7 @@ import {
 import {
   acknowledgeLiveAlert,
   buildOverview,
+  createLiveCommand,
   generateContactorAlerts,
   getLiveDashboard,
   silenceLiveAlert,
@@ -103,7 +104,12 @@ export function DashboardPage() {
   const [banner, setBanner] = useState<BannerState | null>(null)
   const [currentTime, setCurrentTime] = useState(() => new Date())
   const [liveWeather, setLiveWeather] = useState<LiveWeather | null>(null)
+  const [rearmReminderOpen, setRearmReminderOpen] = useState(false)
   const timersRef = useRef<number[]>([])
+  const fencePowerRef = useRef<'ON' | 'OFF' | null>(null)
+  const rearmSuppressedRef = useRef(false)  // user said "Not Now"
+  const rearmCycledRef = useRef(false)       // fence was rearmed after "Not Now"
+  const rearmTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     let isActive = true
@@ -173,6 +179,7 @@ export function DashboardPage() {
       isActive = false
       unsubscribe()
       timersRef.current.forEach((t) => window.clearTimeout(t))
+      if (rearmTimerRef.current !== null) window.clearTimeout(rearmTimerRef.current)
     }
   }, [])
 
@@ -182,6 +189,41 @@ export function DashboardPage() {
       setOverview(buildOverview(devices))
     }
   }, [devices])
+
+  // Detect fence ON→OFF transitions and schedule a 1-minute rearm reminder.
+  useEffect(() => {
+    if (!overview) return
+    const current = overview.fenceLine.chargerPower === 'ON' ? 'ON' as const : 'OFF' as const
+    const prev = fencePowerRef.current
+    fencePowerRef.current = current
+    if (prev === null) return // initial load — no transition yet
+
+    if (current === 'ON' && prev === 'OFF') {
+      // Fence was armed — cancel any pending reminder
+      if (rearmTimerRef.current !== null) {
+        window.clearTimeout(rearmTimerRef.current)
+        rearmTimerRef.current = null
+      }
+      // Track that the user rearmed after saying "Not Now"
+      if (rearmSuppressedRef.current) rearmCycledRef.current = true
+    }
+
+    if (current === 'OFF' && prev === 'ON') {
+      // Fence just turned off
+      if (rearmCycledRef.current) {
+        // They manually rearmed then turned off again — reset suppression
+        rearmSuppressedRef.current = false
+        rearmCycledRef.current = false
+      }
+      if (!rearmSuppressedRef.current) {
+        // Schedule the reminder for 1 minute of being off
+        rearmTimerRef.current = window.setTimeout(() => {
+          rearmTimerRef.current = null
+          setRearmReminderOpen(true)
+        }, 60_000)
+      }
+    }
+  }, [overview])
 
   const activeAlerts = useMemo(() => alerts.filter((a) => !a.resolved_at), [alerts])
 
@@ -360,6 +402,30 @@ export function DashboardPage() {
     timersRef.current = [t1, t2, t3]
   }
 
+  async function handleFenceOn() {
+    const fence = devices.find((d) => d.type === 'fence')
+    if (!fence) return
+    if (isSupabaseConfigured) {
+      const { error } = await createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', requested_by: 'dashboard' })
+      setBanner(error ? { tone: 'danger', message: `Failed to send ON command: ${error}` } : { tone: 'success', message: 'Fence arm command sent.' })
+    } else {
+      await createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'home-tablet' })
+      setBanner({ tone: 'success', message: 'Fence arm command sent.' })
+    }
+  }
+
+  async function handleFenceOff() {
+    const fence = devices.find((d) => d.type === 'fence')
+    if (!fence) return
+    if (isSupabaseConfigured) {
+      const { error } = await createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_OFF', requested_by: 'dashboard' })
+      setBanner(error ? { tone: 'danger', message: `Failed to send OFF command: ${error}` } : { tone: 'warning', message: 'Fence disarm command sent.' })
+    } else {
+      await createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_OFF', payload: {}, requested_by: 'home-tablet' })
+      setBanner({ tone: 'warning', message: 'Fence disarm command sent.' })
+    }
+  }
+
   async function handleAcknowledgeAlert(alertId: string) {
     if (isSupabaseConfigured) {
       await acknowledgeLiveAlert(alertId)
@@ -368,6 +434,32 @@ export function DashboardPage() {
     }
     setAlerts((prev) => prev.map((a) => a.id === alertId ? { ...a, acknowledged: true } : a))
     setBanner({ tone: 'info', message: 'Alert acknowledged.' })
+  }
+
+  async function handleRearmYes() {
+    setRearmReminderOpen(false)
+    const fence = devices.find((d) => d.type === 'fence')
+    if (!fence) return
+    if (isSupabaseConfigured) {
+      const { error } = await createLiveCommand({
+        target_device_id: fence.id,
+        command_type: 'FENCE_TURN_ON',
+        requested_by: 'dashboard',
+      })
+      setBanner(error
+        ? { tone: 'danger', message: `Failed to send arm command: ${error}` }
+        : { tone: 'success', message: 'Fence arm command sent.' },
+      )
+    } else {
+      await createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'home-tablet' })
+      setBanner({ tone: 'success', message: 'Fence arm command sent.' })
+    }
+  }
+
+  function handleRearmNo() {
+    setRearmReminderOpen(false)
+    rearmSuppressedRef.current = true
+    rearmCycledRef.current = false
   }
 
   if (isLoading || !overview) {
@@ -384,7 +476,6 @@ export function DashboardPage() {
   return (
     <section className="dashboard-page dashboard-page--home">
       <DashboardHeader
-        title={overview.title}
         gatewayStatus={overview.gatewayStatus}
         networkStrength={overview.networkStrength}
         currentTime={formatClock(currentTime)}
@@ -394,7 +485,14 @@ export function DashboardPage() {
 
       <section className="status-card-grid">
         {summaryCards.map((card) => (
-          <StatusCard key={card.label} {...card} />
+          <StatusCard
+            key={card.label}
+            {...card}
+            {...(card.label === 'Fence' ? {
+              onToggleOn: () => void handleFenceOn(),
+              onToggleOff: () => void handleFenceOff(),
+            } : {})}
+          />
         ))}
       </section>
 
@@ -469,6 +567,41 @@ export function DashboardPage() {
         onShutOff={() => void handleWellPumpShutoff()}
         onSilence={() => void handleSilenceAlert()}
       />
+
+      {rearmReminderOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="modal-card panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rearm-title"
+          >
+            <div className="modal-card__header">
+              <p className="eyebrow">Fence Reminder</p>
+              <h2 id="rearm-title">Arm the Fence?</h2>
+            </div>
+            <p className="modal-card__message">
+              The fence has been off for 1 minute. Would you like to arm it now?
+            </p>
+            <div className="button-row">
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => void handleRearmYes()}
+              >
+                Arm Now
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={handleRearmNo}
+              >
+                Not Now
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   )
 }
