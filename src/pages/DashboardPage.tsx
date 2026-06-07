@@ -193,10 +193,10 @@ export function DashboardPage() {
               // Compare by serialising key fields rather than deep-equal
               const same =
                 d.status === f.status &&
-                (d.meta as Record<string, unknown>)?.charger_power ===
-                  (f.meta as Record<string, unknown>)?.charger_power &&
-                (d.meta as Record<string, unknown>)?.contactor_feedback ===
-                  (f.meta as Record<string, unknown>)?.contactor_feedback
+                (d.metadata as Record<string, unknown>)?.charger_power ===
+                  (f.metadata as Record<string, unknown>)?.charger_power &&
+                (d.metadata as Record<string, unknown>)?.contactor_feedback ===
+                  (f.metadata as Record<string, unknown>)?.contactor_feedback
               if (same) return d
               changed = true
               return f
