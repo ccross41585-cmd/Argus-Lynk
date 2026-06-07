@@ -29,6 +29,7 @@ const int RELAY_IDLE_LEVEL   = RELAY_ACTIVE_LOW ? HIGH : LOW;
 // Heartbeat interval (ms). Field node broadcasts state every HB_INTERVAL_MS.
 const unsigned long HB_INTERVAL_MS = 30000;
 unsigned long lastHeartbeatAt = 0;
+bool immediateHeartbeatNeeded = false;  // Set true to fire HB ASAP (e.g. power-loss detected).
 
 // Auto-rearm removed: only gateway commands change relay state.
 
@@ -98,6 +99,14 @@ void checkFeedbackChange() {
     Serial.println(raw);
     Serial.print("Contactor feedback: ");
     Serial.println(fb);
+    // If the fence was commanded ON but the contactor just disengaged, the
+    // power supply may have failed.  Flag an immediate heartbeat so the
+    // gateway learns about the failure within one loop tick instead of
+    // waiting up to 30 s for the normal scheduled heartbeat.
+    if (fb == "FAILED" && commandedOn) {
+      Serial.println("Power loss detected while commanded ON — flagging immediate HB.");
+      immediateHeartbeatNeeded = true;
+    }
   }
 }
 
@@ -451,7 +460,15 @@ void setup() {
 
 void loop() {
   // Continuous physical feedback monitoring — prints on any transition.
+  // Also sets immediateHeartbeatNeeded if power loss is detected.
   checkFeedbackChange();
+
+  // Immediate heartbeat on power-loss detection (higher priority than interval).
+  if (immediateHeartbeatNeeded) {
+    immediateHeartbeatNeeded = false;
+    lastHeartbeatAt = millis();  // Reset interval so next scheduled HB doesn't fire immediately.
+    sendHeartbeat();
+  }
 
   // Periodic heartbeat so the gateway can track aux_raw without a command cycle.
   if (millis() - lastHeartbeatAt >= HB_INTERVAL_MS) {

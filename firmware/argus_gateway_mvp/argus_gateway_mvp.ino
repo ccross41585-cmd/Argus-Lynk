@@ -88,6 +88,12 @@ struct AckPacket {
 // Populated the first time a command for that node is processed.
 String cachedFenceDeviceId = "";
 
+// Heartbeat fault detection
+unsigned long lastHbReceivedAt = 0;     // millis() when last HB was received from field node
+bool powerLossAlertSent = false;         // Dedup: cleared when feedback returns to healthy
+bool nodeOfflineAlertSent = false;       // Dedup: cleared when next HB arrives
+const unsigned long HB_OFFLINE_TIMEOUT_MS = 75000; // 2.5× the 30 s field-node HB interval
+
 struct TransmitResult {
   bool isSuccess;
   int state;
@@ -451,6 +457,91 @@ bool updateDeviceContactorFeedback(const String& deviceId, const String& contact
 
   String patchUrl = buildApiUrl("devices?id=eq." + deviceId);
   return sendJsonPatch(patchUrl, patchPayload, "PATCH devices contactor feedback");
+}
+
+// ── Alert creation + push notification ─────────────────────────────────────────────
+
+// Inserts an alert row into Supabase and returns the new alert UUID string.
+// Returns an empty string on failure.
+String insertAlert(const String& severity, const String& title, const String& message) {
+  DynamicJsonDocument body(512);
+  if (cachedFenceDeviceId.length() > 0) {
+    body["device_id"] = cachedFenceDeviceId;
+  }
+  body["severity"] = severity;
+  body["title"]    = title;
+  body["message"]  = message;
+  body["status"]   = "active";
+
+  String payload;
+  serializeJson(body, payload);
+
+  String url = buildApiUrl("alerts");
+  HTTPClient http;
+  http.begin(url);
+  http.setReuse(false);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", SUPABASE_ANON_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
+  http.addHeader("Prefer", "return=representation");
+
+  int statusCode = http.POST(payload);
+  String response = http.getString();
+  http.end();
+
+  if (statusCode < 200 || statusCode >= 300) {
+    Serial.printf("insertAlert failed. HTTP %d\n", statusCode);
+    return "";
+  }
+
+  // Supabase returns a JSON array of inserted rows when Prefer:return=representation is set.
+  DynamicJsonDocument doc(1024);
+  if (deserializeJson(doc, response)) {
+    Serial.println("insertAlert: JSON parse error");
+    return "";
+  }
+
+  String alertId;
+  if (doc.is<JsonArray>() && doc[0]["id"].is<const char*>()) {
+    alertId = String(doc[0]["id"].as<const char*>());
+  }
+  Serial.printf("Alert inserted: %s\n", alertId.c_str());
+  return alertId;
+}
+
+// Calls the Supabase edge function to fan push notifications out to all
+// subscribed devices for the given alert.
+void callPushEdgeFunction(const String& alertId) {
+  if (alertId.length() == 0) return;
+
+  DynamicJsonDocument body(128);
+  body["alertId"] = alertId;
+  String payload;
+  serializeJson(body, payload);
+
+  String url = String(SUPABASE_URL) + "/functions/v1/send-push-notification";
+  HTTPClient http;
+  http.begin(url);
+  http.setReuse(false);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", SUPABASE_ANON_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
+
+  int statusCode = http.POST(payload);
+  String response = http.getString();
+  http.end();
+
+  if (statusCode < 200 || statusCode >= 300) {
+    Serial.printf("callPushEdgeFunction failed. HTTP %d: %s\n", statusCode, response.substring(0, 80).c_str());
+    return;
+  }
+  Serial.printf("Push dispatched for alert %s: %s\n", alertId.c_str(), response.substring(0, 60).c_str());
+}
+
+// One-step: insert alert + fire push notifications.
+void createAndSendAlert(const String& severity, const String& title, const String& message) {
+  String alertId = insertAlert(severity, title, message);
+  callPushEdgeFunction(alertId);
 }
 
 bool markCommandFailed(const PendingCommand& command, const String& errorMessage) {
@@ -877,7 +968,34 @@ void processHeartbeatIfReady() {
   Serial.printf("HB received: state=%s fb=%s aux=%s\n",
     hbState.c_str(), hbFb.c_str(), hbAux.c_str());
   lastFenceState = normalizedFenceState(hbState);
+  lastHbReceivedAt = millis();
+  nodeOfflineAlertSent = false;  // Field node is alive — reset offline alert dedup.
   drawScreen();
+
+  // Healthy states clear the power-loss dedup so future faults alert again.
+  if (hbFb == "CONFIRMED" || hbFb == "OPEN") {
+    powerLossAlertSent = false;
+  }
+
+  // Fence commanded ON but contactor did not engage — likely power supply failure.
+  if (hbFb == "FAILED" && !powerLossAlertSent) {
+    powerLossAlertSent = true;
+    createAndSendAlert(
+      "critical",
+      "Fence Power Loss",
+      "Fence was commanded ON but the auxiliary contact (GPIO34) reports the contactor is not engaged. Check the fence power supply."
+    );
+  }
+
+  // Contactor stuck on after OFF command.
+  if (hbFb == "STUCK_ON" && !powerLossAlertSent) {
+    powerLossAlertSent = true;
+    createAndSendAlert(
+      "warning",
+      "Fence Contactor Stuck ON",
+      "Fence was commanded OFF but the auxiliary contact (GPIO34) still reports the contactor is engaged."
+    );
+  }
 
   if (cachedFenceDeviceId.length() > 0) {
     updateDeviceContactorFeedback(cachedFenceDeviceId, hbFb, hbAux);
@@ -902,6 +1020,9 @@ void setup() {
   initializeLoRa();
 
   Serial.println("Gateway ready. Waiting for next poll cycle.");
+  // Start passive receive immediately so HB packets from the field node are
+  // captured before the first command poll cycle completes.
+  radio.startReceive();
   drawScreen();
 }
 
@@ -910,6 +1031,36 @@ void loop() {
 
   // Drain any incoming HB packets while idle between polls.
   processHeartbeatIfReady();
+
+  // Detect field node going offline (no heartbeat within 2.5× the HB interval).
+  // Only triggers after we have received at least one HB (lastHbReceivedAt > 0),
+  // so a freshly-booted gateway does not false-alarm before the node checks in.
+  if (lastHbReceivedAt > 0 &&
+      (millis() - lastHbReceivedAt) > HB_OFFLINE_TIMEOUT_MS &&
+      !nodeOfflineAlertSent) {
+    nodeOfflineAlertSent = true;
+    powerLossAlertSent = true;  // Avoid a second alert when HB resumes with FAILED state.
+    Serial.println("Field node heartbeat timeout — marking device offline.");
+
+    // Mark the device offline in Supabase.
+    if (cachedFenceDeviceId.length() > 0) {
+      DynamicJsonDocument offlineBody(128);
+      offlineBody["online"] = false;
+      String offlinePayload;
+      serializeJson(offlineBody, offlinePayload);
+      sendJsonPatch(
+        buildApiUrl("devices?id=eq." + cachedFenceDeviceId),
+        offlinePayload,
+        "PATCH device offline (HB timeout)"
+      );
+    }
+
+    createAndSendAlert(
+      "critical",
+      "Field Node Offline",
+      "The fence field node has not sent a heartbeat in over 75 seconds. It may have lost power or LoRa connectivity."
+    );
+  }
 
   if (millis() - lastPollStartedAt >= POLL_INTERVAL_MS) {
     lastPollStartedAt = millis();

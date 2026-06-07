@@ -14,11 +14,11 @@ interface PushSubscriptionRow {
 
 interface AlertRow {
   id: string
-  type: string
+  title: string
   message: string
   severity: string
   device_id: string
-  tenant_id: string
+  tenant_id: string | null
 }
 
 interface RequestPayload {
@@ -174,7 +174,7 @@ serve(async (req: Request) => {
   // 1. Load alert
   const { data: alert, error: alertErr } = await supabase
     .from('alerts')
-    .select('id, type, message, severity, device_id, tenant_id')
+    .select('id, title, message, severity, device_id, tenant_id')
     .eq('id', body.alertId)
     .single()
 
@@ -187,15 +187,16 @@ serve(async (req: Request) => {
 
   const alertRow = alert as AlertRow
 
-  // 2. Load enabled subscriptions for the tenant
+  // 2. Load enabled subscriptions.
+  // When tenant_id is null (e.g. gateway-inserted alert), send to ALL enabled
+  // subscriptions so device-level alerts always reach users.
   let subsQuery = supabase
     .from('push_subscriptions')
     .select('id, user_id, endpoint, p256dh, auth, device_label')
-    .eq('tenant_id', alertRow.tenant_id)
     .eq('enabled', true)
 
-  if (body.targetUserId) {
-    subsQuery = subsQuery.eq('user_id', body.targetUserId)
+  if (alertRow.tenant_id) {
+    subsQuery = subsQuery.eq('tenant_id', alertRow.tenant_id)
   }
 
   const { data: subscriptions, error: subsErr } = await subsQuery
@@ -216,7 +217,7 @@ serve(async (req: Request) => {
   // 3. Build payload
   const alertUrl = `/alerts/${alertRow.id}`
   const pushPayload = JSON.stringify({
-    title: alertRow.type === 'well_pump_long_runtime' ? 'Well Pump Alert' : 'Argus Lynk Alert',
+    title: alertRow.title || 'Argus Lynk Alert',
     body: alertRow.message,
     icon: '/app-icon.svg',
     badge: '/app-icon.svg',
