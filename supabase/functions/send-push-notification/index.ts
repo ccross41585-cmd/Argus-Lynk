@@ -47,26 +47,40 @@ async function buildVapidAuthHeader(audience: string): Promise<string> {
 
   const signingInput = `${encode(header)}.${encode(claims)}`
 
+  // Import the ECDSA P-256 private key.
+  // VAPID_PRIVATE_KEY may be stored as a JWK JSON string or as a raw
+  // base64url-encoded private scalar (d value only).
+  // Web Crypto does NOT support 'raw' format for ECDSA private keys,
+  // so for the raw-scalar case we derive x/y from the public key and
+  // construct a complete JWK before importing.
   let privateKey: CryptoKey
   try {
+    // Try JWK path first
     const jwk = JSON.parse(VAPID_PRIVATE_KEY) as JsonWebKey
     privateKey = await crypto.subtle.importKey(
-      'jwk',
-      jwk,
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      false,
-      ['sign'],
+      'jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign'],
     )
+    console.log('[VAPID] Private key imported as JWK')
   } catch {
-    // Fallback: treat as raw base64url scalar
-    const rawBytes = b64uDecode(VAPID_PRIVATE_KEY)
+    // Fall back: raw base64url private scalar.
+    // Extract x,y from the uncompressed public key (0x04 || x32 || y32).
+    console.log('[VAPID] JWK parse failed, building JWK from raw scalar + public key')
+    const pubBytes = b64uDecode(VAPID_PUBLIC_KEY)
+    if (pubBytes.length !== 65 || pubBytes[0] !== 0x04) {
+      throw new Error(`VAPID_PUBLIC_KEY is not a 65-byte uncompressed P-256 point (got ${pubBytes.length} bytes, first byte 0x${pubBytes[0].toString(16)})`)
+    }
+    const x = b64uEncode(pubBytes.slice(1, 33))
+    const y = b64uEncode(pubBytes.slice(33, 65))
+    const jwk: JsonWebKey = {
+      kty: 'EC', crv: 'P-256',
+      d: VAPID_PRIVATE_KEY,
+      x, y,
+      key_ops: ['sign'], ext: true,
+    }
     privateKey = await crypto.subtle.importKey(
-      'raw',
-      rawBytes,
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      false,
-      ['sign'],
+      'jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign'],
     )
+    console.log('[VAPID] Private key imported via constructed JWK')
   }
 
   const signatureBytes = await crypto.subtle.sign(
@@ -253,11 +267,13 @@ async function sendWebPush(
     body: encryptedBody,
   })
 
+  const responseText = await response.text().catch(() => '')
   if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    return { status: response.status, error: text.slice(0, 200) }
+    console.error(`[PUSH] HTTP ${response.status} for endpoint ${sub.endpoint.slice(0, 60)}: ${responseText.slice(0, 200)}`)
+    return { status: response.status, error: responseText.slice(0, 200) }
   }
 
+  console.log(`[PUSH] HTTP ${response.status} OK for sub ${sub.id}`)
   return { status: response.status }
 }
 
@@ -295,6 +311,8 @@ serve(async (req: Request) => {
     return new Response('Missing alertId', { status: 400 })
   }
 
+  console.log(`[HANDLER] alertId=${body.alertId}`)
+
   // 1. Load alert
   const { data: alert, error: alertErr } = await supabase
     .from('alerts')
@@ -303,6 +321,7 @@ serve(async (req: Request) => {
     .single()
 
   if (alertErr || !alert) {
+    console.error('[HANDLER] Alert not found:', alertErr?.message)
     return new Response(JSON.stringify({ error: alertErr?.message ?? 'Alert not found' }), {
       status: 404,
       headers: { 'Content-Type': 'application/json' },
@@ -310,6 +329,7 @@ serve(async (req: Request) => {
   }
 
   const alertRow = alert as AlertRow
+  console.log(`[HANDLER] Alert loaded: "${alertRow.title}" severity=${alertRow.severity} tenant=${alertRow.tenant_id ?? 'null'}`)
 
   // 2. Load enabled subscriptions.
   // When tenant_id is null (e.g. gateway-inserted alert), send to ALL enabled
@@ -325,12 +345,14 @@ serve(async (req: Request) => {
 
   const { data: subscriptions, error: subsErr } = await subsQuery
   if (subsErr) {
+    console.error('[HANDLER] push_subscriptions query error:', subsErr.message)
     return new Response(JSON.stringify({ error: subsErr.message }), {
       status: 500, headers: { 'Content-Type': 'application/json' },
     })
   }
 
   const subs = (subscriptions ?? []) as PushSubscriptionRow[]
+  console.log(`[HANDLER] Found ${subs.length} active subscription(s)`)
 
   if (subs.length === 0) {
     return new Response(JSON.stringify({ sent: 0, message: 'No active subscriptions' }), {
@@ -363,7 +385,9 @@ serve(async (req: Request) => {
   const results = { sent: 0, failed: 0, expired: 0 }
 
   for (const sub of subs) {
+    console.log(`[SEND] sub=${sub.id} endpoint=${sub.endpoint.slice(0, 60)}`)
     const { status, error: pushError } = await sendWebPush(sub, pushPayload)
+    console.log(`[SEND] result status=${status} error=${pushError ?? 'none'}`)
 
     let eventStatus: string
     if (status >= 200 && status < 300) {
@@ -395,6 +419,7 @@ serve(async (req: Request) => {
     })
   }
 
+  console.log(`[HANDLER] Done: sent=${results.sent} failed=${results.failed} expired=${results.expired}`)
   return new Response(JSON.stringify(results), {
     headers: { 'Content-Type': 'application/json' },
   })

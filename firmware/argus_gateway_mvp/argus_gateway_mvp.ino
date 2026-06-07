@@ -973,7 +973,13 @@ void processHeartbeatIfReady() {
 
   Serial.printf("HB received: state=%s fb=%s aux=%s\n",
     hbState.c_str(), hbFb.c_str(), hbAux.c_str());
-  lastFenceState = normalizedFenceState(hbState);
+  // Show physical contactor feedback on OLED when a fault exists,
+  // otherwise show the commanded state (ON/OFF).
+  if (hbFb == "FAILED" || hbFb == "STUCK_ON") {
+    lastFenceState = hbFb;
+  } else {
+    lastFenceState = normalizedFenceState(hbState);
+  }
   lastHbReceivedAt = millis();
   nodeOfflineAlertSent = false;  // Field node is alive — reset offline alert dedup.
   drawScreen();
