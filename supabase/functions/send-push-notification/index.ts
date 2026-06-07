@@ -203,13 +203,17 @@ async function encryptPushPayload(
   // 7. AES-128-GCM encrypt
   const cek = await crypto.subtle.importKey('raw', cekRaw, { name: 'AES-GCM' }, false, ['encrypt'])
 
-  // Pad plaintext: append 0x02 delimiter + zero-padding to a fixed record size
+  // Pad plaintext: append 0x02 delimiter (RFC 8291) — no extra zero-padding
+  // needed for small payloads.  Using a fixed 4096-byte record size caused the
+  // total body to exceed FCM's 4096-byte limit; we size the record to exactly
+  // fit the content instead.
   const plaintextBytes = enc.encode(plaintext)
-  const recordSize = 4096
-  const paddedLen = recordSize - 16  // AES-GCM tag is 16 bytes
-  const padded = new Uint8Array(paddedLen)
+  const padded = new Uint8Array(plaintextBytes.length + 1)
   padded.set(plaintextBytes, 0)
   padded[plaintextBytes.length] = 0x02  // RFC 8291 delimiter
+
+  // Record size written into the header = padded length + 16-byte AES-GCM tag.
+  const recordSize = padded.length + 16
 
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, cek, padded),
