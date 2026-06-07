@@ -81,7 +81,12 @@ struct AckPacket {
   String sequence;
   String confirmedState;
   String contactorFeedback;
+  String auxRaw;   // AUX_LOW or AUX_HIGH as reported by field node GPIO34
 };
+
+// Cached Supabase device ID for the NODE_ID field node.
+// Populated the first time a command for that node is processed.
+String cachedFenceDeviceId = "";
 
 struct TransmitResult {
   bool isSuccess;
@@ -412,8 +417,8 @@ bool markCommandAcknowledged(const PendingCommand& command, const String& confir
   return true;
 }
 
-bool updateDeviceContactorFeedback(const String& deviceId, const String& contactorFeedback) {
-  if (contactorFeedback.length() == 0) {
+bool updateDeviceContactorFeedback(const String& deviceId, const String& contactorFeedback, const String& auxRaw) {
+  if (contactorFeedback.length() == 0 && auxRaw.length() == 0) {
     return true;
   }
 
@@ -435,6 +440,9 @@ bool updateDeviceContactorFeedback(const String& deviceId, const String& contact
     }
   }
   merged["contactor_feedback"] = contactorFeedback;
+  if (auxRaw.length() > 0) {
+    merged["aux_raw"] = auxRaw;
+  }
 
   DynamicJsonDocument patchBody(512);
   patchBody["metadata"] = merged;
@@ -663,6 +671,7 @@ AckPacket waitForAck(const PendingCommand& command) {
     String packetSequence = packetPart(packet, 3);
     String packetAction = packetPart(packet, 4);
     String packetContactorFeedback = packetPart(packet, 5);
+    String packetAuxRaw            = packetPart(packet, 6);  // AUX_LOW or AUX_HIGH
 
     if (packetType != "ACK") {
       logVerbose("ACK ignored because type is not ACK.");
@@ -698,6 +707,7 @@ AckPacket waitForAck(const PendingCommand& command) {
     ack.isValid = true;
     ack.sequence = packetSequence;
     ack.contactorFeedback = packetContactorFeedback;
+    ack.auxRaw = packetAuxRaw;
     loraOk = true;
     lastRssi = radio.getRSSI();
     lastSnr = radio.getSNR();
@@ -798,7 +808,7 @@ void processPendingCommand(const PendingCommand& command) {
 
   if (ack.isValid) {
     if (markCommandAcknowledged(command, ack.confirmedState)) {
-      updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback);
+      updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw);
       rememberCommandId(command.id);
     }
     Serial.println("Finished command processing, returning to polling");
@@ -820,7 +830,62 @@ void pollSupabase() {
 
   for (size_t index = 0; index < commandCount; index++) {
     processPendingCommand(commands[index]);
+    // Cache device ID so heartbeat updates can reach Supabase without a command.
+    if (commands[index].deviceId.length() > 0 && cachedFenceDeviceId.length() == 0) {
+      cachedFenceDeviceId = commands[index].deviceId;
+    }
   }
+
+  // After processing all pending commands, return radio to passive receive mode
+  // so incoming HB packets are captured between poll cycles.
+  radio.startReceive();
+}
+
+// Processes one incoming LoRa HB packet if receivedFlag is set.
+// Updates Supabase device metadata (contactor_feedback + aux_raw) without
+// requiring an in-flight command.
+void processHeartbeatIfReady() {
+  if (!receivedFlag) return;
+  receivedFlag = false;
+
+  String packet;
+  int state = radio.readData(packet);
+  if (state != RADIOLIB_ERR_NONE) {
+    radio.startReceive();
+    return;
+  }
+  packet.trim();
+
+  String pType = packetPart(packet, 0);
+  if (pType != "HB") {
+    // Not a heartbeat — could be a stray ACK. Discard and re-listen.
+    radio.startReceive();
+    return;
+  }
+
+  String hbKey   = packetPart(packet, 1);
+  String hbNode  = packetPart(packet, 2);
+  String hbState = packetPart(packet, 3);
+  String hbFb    = packetPart(packet, 4);
+  String hbAux   = packetPart(packet, 5);
+
+  if (hbKey != NETWORK_KEY || hbNode != NODE_ID) {
+    radio.startReceive();
+    return;
+  }
+
+  Serial.printf("HB received: state=%s fb=%s aux=%s\n",
+    hbState.c_str(), hbFb.c_str(), hbAux.c_str());
+  lastFenceState = normalizedFenceState(hbState);
+  drawScreen();
+
+  if (cachedFenceDeviceId.length() > 0) {
+    updateDeviceContactorFeedback(cachedFenceDeviceId, hbFb, hbAux);
+  } else {
+    Serial.println("HB: no cached device ID yet — skipping Supabase update");
+  }
+
+  radio.startReceive();
 }
 
 void setup() {
@@ -842,6 +907,9 @@ void setup() {
 
 void loop() {
   ensureWifiConnected();
+
+  // Drain any incoming HB packets while idle between polls.
+  processHeartbeatIfReady();
 
   if (millis() - lastPollStartedAt >= POLL_INTERVAL_MS) {
     lastPollStartedAt = millis();

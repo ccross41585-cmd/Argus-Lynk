@@ -51,7 +51,7 @@ export function toGatewayCommand(commandType: string): string {
 // ── Device mapping ────────────────────────────────────────────────────────────
 
 // Contactor feedback values that indicate an electrical fault.
-const CONTACTOR_FAULT_VALUES = ['FAILED', 'STUCK ON'] as const
+const CONTACTOR_FAULT_VALUES = ['FAILED', 'STUCK_ON'] as const
 type ContactorFault = typeof CONTACTOR_FAULT_VALUES[number]
 
 function isContactorFault(fb: string): fb is ContactorFault {
@@ -90,7 +90,7 @@ export function mapDevice(row: Device): DashboardDevice {
   let status = deviceStatus(row)
   if (type === 'fence' && status === 'online') {
     const fb = String(meta.contactor_feedback ?? '')
-    if (fb === 'STUCK ON') status = 'critical'
+    if (fb === 'STUCK_ON') status = 'critical'
     else if (fb === 'FAILED') status = 'warning'
   }
 
@@ -121,12 +121,13 @@ export function buildOverview(devices: DashboardDevice[]): DashboardOverview {
 
   const fenceConfirmed = String(fence?.metadata.relay_feedback ?? '').toUpperCase()
   const fenceContactor = String(fence?.metadata.contactor_feedback ?? fenceConfirmed).toUpperCase()
+  const fenceAuxRaw    = String(fence?.metadata.aux_raw ?? '')
 
   const fenceFeedback = ((): DashboardOverview['fenceLine']['feedback'] => {
     if (fenceContactor === 'CONFIRMED') return 'Contactor confirmed ON'
     if (fenceContactor === 'OPEN')      return 'Contactor confirmed OFF'
     if (fenceContactor === 'FAILED')    return 'Contactor confirmed OFF'
-    if (fenceContactor === 'STUCK ON')  return 'Contactor confirmed ON'
+    if (fenceContactor === 'STUCK_ON')  return 'Contactor confirmed ON'
     if (fenceConfirmed === 'ON')        return 'Contactor confirmed ON'
     if (fenceConfirmed === 'OFF')       return 'Contactor confirmed OFF'
     return 'Awaiting confirmation'
@@ -135,10 +136,11 @@ export function buildOverview(devices: DashboardDevice[]): DashboardOverview {
   const fenceLastCmd = (String(fence?.metadata.last_command ?? 'OFF').toUpperCase()) as 'ON' | 'OFF' | 'TEST'
 
   const fenceVerificationNote = (() => {
-    if (fenceContactor === 'FAILED')   return 'Fault: Contactor failed to engage'
-    if (fenceContactor === 'STUCK ON') return 'Fault: Contactor stuck on'
+    if (fenceContactor === 'FAILED')    return 'Fault: Contactor failed to engage'
+    if (fenceContactor === 'STUCK_ON')  return 'Fault: Contactor stuck on'
     if (fenceContactor === 'CONFIRMED') return 'Aux contact confirmed contactor engaged.'
     if (fenceContactor === 'OPEN')      return 'Aux contact confirmed contactor open.'
+    if (!fenceAuxRaw)                   return 'Aux feedback not verified — no raw GPIO data received yet.'
     return 'Auxiliary contact feedback from field node.'
   })()
 
@@ -157,6 +159,7 @@ export function buildOverview(devices: DashboardDevice[]): DashboardOverview {
       lastCommand:      fenceLastCmd,
       feedback:         fenceFeedback,
       verificationNote: fenceVerificationNote,
+      auxRaw:           fenceAuxRaw,
     },
     // Placeholder stubs — replaced when those devices are installed
     wellPump: {
@@ -209,7 +212,7 @@ export function generateContactorAlerts(
     const fb = String(device.metadata.contactor_feedback ?? '').toUpperCase()
     if (!isContactorFault(fb as ContactorFault)) continue
 
-    const alertType = fb === 'STUCK ON' ? 'fence_contactor_stuck_on' : 'fence_contactor_failed'
+    const alertType = fb === 'STUCK_ON' ? 'fence_contactor_stuck_on' : 'fence_contactor_failed'
 
     // Skip if a matching active alert already exists (DB-sourced or already synthetic)
     const alreadyActive = existingAlerts.some(
@@ -221,10 +224,33 @@ export function generateContactorAlerts(
       id:             `synth-${device.id}-${alertType}`,
       device_id:      device.id,
       type:           alertType,
-      severity:       fb === 'STUCK ON' ? 'critical' : 'warning',
-      message:        fb === 'STUCK ON'
+      severity:       fb === 'STUCK_ON' ? 'critical' : 'warning',
+      message:        fb === 'STUCK_ON'
         ? 'Fence was commanded off, but the auxiliary contact still reports the contactor engaged.'
         : 'Fence command was sent, but the auxiliary contact did not confirm the contactor engaged.',
+      acknowledged:   false,
+      silenced_until: null,
+      created_at:     new Date().toISOString(),
+      resolved_at:    null,
+    })
+  }
+
+  // If the fence is online but has never sent aux_raw, generate a "feedback unknown" notice.
+  for (const device of devices) {
+    if (device.type !== 'fence' || device.status === 'offline') continue
+    const auxRaw = String(device.metadata.aux_raw ?? '')
+    if (auxRaw) continue  // aux_raw present — no warning needed
+    const warnId = `synth-${device.id}-aux_raw_missing`
+    const alreadyActive = existingAlerts.some(
+      (a) => a.id === warnId && !a.resolved_at,
+    )
+    if (alreadyActive) continue
+    synthetic.push({
+      id:             warnId,
+      device_id:      device.id,
+      type:           'fence_aux_feedback_unknown',
+      severity:       'warning',
+      message:        'Aux contact feedback (GPIO34) has not been received yet. Contactor state cannot be independently verified.',
       acknowledged:   false,
       silenced_until: null,
       created_at:     new Date().toISOString(),

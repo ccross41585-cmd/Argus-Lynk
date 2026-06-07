@@ -168,6 +168,7 @@ function LocalDeviceDetail({ deviceId }: { deviceId: string }) {
           lastCommand={overview.fenceLine.lastCommand}
           feedback={overview.fenceLine.feedback}
           note={overview.fenceLine.verificationNote}
+          auxRaw={overview.fenceLine.auxRaw || undefined}
           latestCommand={latestCommand}
           onTurnOn={() => void handleFenceCommand('FENCE_TURN_ON')}
           onTurnOff={() => void handleFenceCommand('FENCE_TURN_OFF')}

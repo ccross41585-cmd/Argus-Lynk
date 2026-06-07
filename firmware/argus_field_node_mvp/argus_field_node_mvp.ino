@@ -22,7 +22,13 @@ const int RELAY_ACTIVE_LEVEL = RELAY_ACTIVE_LOW ? LOW  : HIGH;
 const int RELAY_IDLE_LEVEL   = RELAY_ACTIVE_LOW ? HIGH : LOW;
 
 // Auxiliary contactor feedback (dry contact: closed = LOW via INPUT_PULLUP).
+// GPIO34 is input-only on the Heltec V3 — INPUT_PULLUP is wired externally.
+// Aux 13 → GPIO34, Aux 14 → GND. Closed = LOW, Open = HIGH.
 #define CONTACTOR_FEEDBACK_PIN 34
+
+// Heartbeat interval (ms). Field node broadcasts state every HB_INTERVAL_MS.
+const unsigned long HB_INTERVAL_MS = 30000;
+unsigned long lastHeartbeatAt = 0;
 
 // Auto-rearm removed: only gateway commands change relay state.
 
@@ -52,24 +58,44 @@ float  lastSNR  = 0.0;
 
 // ── Contactor feedback ────────────────────────────────────────────────────────
 
+// Debounced read: 5 samples over 100 ms, majority vote.
+// Returns true when the aux contact is closed (LOW = circuit complete).
+bool readAuxDebounced() {
+  int lowCount = 0;
+  for (int i = 0; i < 5; i++) {
+    if (digitalRead(CONTACTOR_FEEDBACK_PIN) == LOW) lowCount++;
+    delay(20);
+  }
+  return lowCount >= 3;
+}
+
+// Raw aux label included in ACK / HB packets so the gateway can forward it.
+String auxRawLabel() {
+  return readAuxDebounced() ? "AUX_LOW" : "AUX_HIGH";
+}
+
 bool contactorIsEngaged() {
-  return digitalRead(CONTACTOR_FEEDBACK_PIN) == LOW;
+  return readAuxDebounced();
 }
 
 // Returns the relationship between the commanded state and the physical contactor.
+// Uses STUCK_ON (underscore) for clean pipe-delimited packet parsing.
 String contactorFeedback() {
   bool engaged = contactorIsEngaged();
   if ( commandedOn &&  engaged) return "CONFIRMED";
   if ( commandedOn && !engaged) return "FAILED";
   if (!commandedOn && !engaged) return "OPEN";
-  /* !commandedOn && engaged */  return "STUCK ON";
+  /* !commandedOn && engaged */  return "STUCK_ON";
 }
 
-// Emits a Serial message whenever the feedback state transitions.
+// Emits a Serial message whenever the feedback state or raw aux level transitions.
 void checkFeedbackChange() {
-  String fb = contactorFeedback();
+  String fb  = contactorFeedback();
+  String raw = auxRawLabel();
   if (fb != lastFeedbackText) {
     lastFeedbackText = fb;
+    Serial.print("AUX_RAW=");
+    Serial.println(raw);
     Serial.print("Contactor feedback: ");
     Serial.println(fb);
   }
@@ -96,7 +122,8 @@ void drawScreen() {
     return;
   }
 
-  String fb = contactorFeedback();
+  String fb  = contactorFeedback();
+  String raw = auxRawLabel();
   char rssiSnr[24];
   snprintf(rssiSnr, sizeof(rssiSnr), "RSSI:%.0f SNR:%.1f", lastRSSI, lastSNR);
 
@@ -108,12 +135,12 @@ void drawScreen() {
   display.println(NODE_ID);
   display.print("Cmd: ");
   display.println(commandedOn ? "ON" : "OFF");
-  display.print("Contactor: ");
-  display.println(fb);
+  display.print("Aux: ");
+  display.println(raw);          // AUX_LOW or AUX_HIGH
+  display.print("Contact: ");
+  display.println(fb);           // CONFIRMED / OPEN / FAILED / STUCK_ON
   display.print("Radio: ");
   display.println(loraOk ? "READY" : "NO");
-  display.print("Last: ");
-  display.println(lastCommandText);
   display.println(rssiSnr);
   display.display();
 }
@@ -189,6 +216,13 @@ void applyRelayState(bool nextCommandedOn) {
     lastErrorText = "";
   }
 
+  // Log raw aux immediately after state change and again after brief settle time.
+  Serial.print("AUX_RAW=");
+  Serial.println(auxRawLabel());
+  delay(200);  // Allow contactor to physically engage/disengage.
+  Serial.print("AUX_RAW_POST_SETTLE=");
+  Serial.println(auxRawLabel());
+
   checkFeedbackChange();
   drawScreen();
 }
@@ -210,15 +244,38 @@ void setupRelay() {
 
 // ── LoRa ──────────────────────────────────────────────────────────────────────
 
+// Sends a heartbeat packet at regular intervals so the gateway can update
+// aux_raw / contactor_feedback without waiting for a command cycle.
+void sendHeartbeat() {
+  String fb  = contactorFeedback();
+  String raw = auxRawLabel();
+  String packet = "HB|" + NETWORK_KEY + "|" + NODE_ID + "|"
+                  + (commandedOn ? "ON" : "OFF") + "|" + fb + "|" + raw + "|" + String(millis());
+  Serial.print("Sending HB: ");
+  Serial.println(packet);
+  int state = radio.transmit(packet);
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.printf("HB transmit failed. RadioLib code: %d\n", state);
+  }
+  state = radio.startReceive();
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.printf("HB: failed to return to receive mode. RadioLib code: %d\n", state);
+  }
+}
+
 void sendAck(const String& sequence) {
-  String fb = contactorFeedback();
+  String fb  = contactorFeedback();
+  String raw = auxRawLabel();
+  // Format: ACK|<key>|<node>|<seq>|<ON/OFF>|<CONFIRMED/FAILED/OPEN/STUCK_ON>|<AUX_LOW/AUX_HIGH>
   String packet = "ACK|" + NETWORK_KEY + "|" + NODE_ID + "|" + sequence
-                  + "|" + (commandedOn ? "ON" : "OFF") + "|" + fb;
+                  + "|" + (commandedOn ? "ON" : "OFF") + "|" + fb + "|" + raw;
   lastAckText = commandedOn ? "ON" : "OFF";
   drawScreen();
 
   Serial.print("Sending ACK: ");
-  Serial.println(packet);
+  Serial.println(packet);  
+  Serial.print("AUX_RAW=");
+  Serial.println(raw);
 
   int state = radio.transmit(packet);
   if (state != RADIOLIB_ERR_NONE) {
@@ -364,7 +421,22 @@ void setup() {
   setupOLED();
   setupRelay();
 
+  // GPIO34 is input-only; use INPUT_PULLUP (the internal pull is weak on this pin
+  // but still helps if the external pull-down wire is removed).
   pinMode(CONTACTOR_FEEDBACK_PIN, INPUT_PULLUP);
+
+  // Boot self-test: read aux raw before relay activates.
+  int rawBoot = digitalRead(CONTACTOR_FEEDBACK_PIN);
+  Serial.print("BOOT_AUX_RAW=");
+  Serial.println(rawBoot == LOW ? "LOW" : "HIGH");
+
+  // If a future build defaults commandedOn=true, wait for relay settle then re-read.
+  if (commandedOn) {
+    delay(500);
+    Serial.print("BOOT_AUX_RAW_POST_RELAY=");
+    Serial.println(auxRawLabel());
+  }
+
   // Seed lastFeedbackText so the first checkFeedbackChange() call is silent.
   lastFeedbackText = contactorFeedback();
   Serial.print("Initial contactor feedback: ");
@@ -380,6 +452,12 @@ void setup() {
 void loop() {
   // Continuous physical feedback monitoring — prints on any transition.
   checkFeedbackChange();
+
+  // Periodic heartbeat so the gateway can track aux_raw without a command cycle.
+  if (millis() - lastHeartbeatAt >= HB_INTERVAL_MS) {
+    lastHeartbeatAt = millis();
+    sendHeartbeat();
+  }
 
   if (!receivedFlag) {
     delay(25);

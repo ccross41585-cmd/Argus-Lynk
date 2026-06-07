@@ -38,6 +38,7 @@ export interface DashboardOverview {
     lastCommand: 'ON' | 'OFF' | 'TEST'
     feedback: 'Contactor confirmed ON' | 'Contactor confirmed OFF' | 'Awaiting confirmation'
     verificationNote: string
+    auxRaw: string   // 'AUX_LOW' | 'AUX_HIGH' | '' (empty = not yet received)
   }
   wellPump: {
     pumpPower: 'ON' | 'OFF'

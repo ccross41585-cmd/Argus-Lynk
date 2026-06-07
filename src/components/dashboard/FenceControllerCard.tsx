@@ -7,6 +7,7 @@ type FenceControllerCardProps = {
   lastCommand: 'ON' | 'OFF' | 'TEST'
   feedback: string
   note: string
+  auxRaw?: string
   latestCommand: CommandRecord | null
   onTurnOn: () => void
   onTurnOff: () => void
@@ -19,6 +20,7 @@ export function FenceControllerCard({
   lastCommand,
   feedback,
   note,
+  auxRaw,
   latestCommand,
   onTurnOn,
   onTurnOff,
@@ -46,7 +48,27 @@ export function FenceControllerCard({
         </div>
         <div className="data-row">
           <span className="label">Contactor Feedback</span>
-          <strong>{feedback}</strong>
+          <strong
+            className={
+              feedback.includes('confirmed ON') ? 'value-green'
+              : feedback.includes('confirmed OFF') ? 'value-muted'
+              : 'value-danger'
+            }
+          >{feedback}</strong>
+        </div>
+        <div className="data-row">
+          <span className="label">Aux Raw (GPIO34)</span>
+          {auxRaw ? (
+            <strong
+              className={
+                auxRaw === 'AUX_LOW' ? 'value-green'
+                : auxRaw === 'AUX_HIGH' ? 'value-muted'
+                : 'value-muted'
+              }
+            >{auxRaw}</strong>
+          ) : (
+            <strong className="value-danger">Not received</strong>
+          )}
         </div>
       </div>
 
