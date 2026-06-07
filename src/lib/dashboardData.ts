@@ -73,8 +73,11 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
   // Use the physical contactor state when we have reliable aux feedback.
   // CONFIRMED/STUCK_ON = contactor is physically closed (energized).
   // FAILED/OPEN        = contactor is physically open (de-energized).
+  // If the device is offline, assume OFF — the relay is normally-open so it
+  // de-energizes when the field node loses power.
   // Anything else      = fall back to the last commanded state from the gateway.
   const chargerPower = (() => {
+    if (!row.online) return 'OFF'
     if (contactorFeedback === 'CONFIRMED' || contactorFeedback === 'STUCK_ON') return 'ON'
     if (contactorFeedback === 'FAILED'    || contactorFeedback === 'OPEN')     return 'OFF'
     return confirmed || desired || '—'

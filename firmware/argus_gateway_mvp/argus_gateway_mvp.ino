@@ -1092,7 +1092,9 @@ void loop() {
     powerLossAlertSent = true;  // Avoid a second alert when HB resumes with FAILED state.
     Serial.println("Field node heartbeat timeout — marking device offline.");
 
-    // Mark the device offline in Supabase.
+    // Mark the device offline in Supabase and clear contactor feedback to OPEN
+    // so the dashboard reflects that the fence is de-energized (relay defaults
+    // to open when the field node loses power).
     if (cachedFenceDeviceId.length() > 0) {
       DynamicJsonDocument offlineBody(128);
       offlineBody["online"] = false;
@@ -1103,6 +1105,8 @@ void loop() {
         offlinePayload,
         "PATCH device offline (HB timeout)"
       );
+      // Write OPEN feedback so dashboard shows fence as OFF, not stale ON.
+      updateDeviceContactorFeedback(cachedFenceDeviceId, "OPEN", "");
     }
 
     createAndSendAlert(
