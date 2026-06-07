@@ -22,6 +22,7 @@ import {
   createLiveCommand,
   generateContactorAlerts,
   getLiveDashboard,
+  getLiveDevices,
   silenceLiveAlert,
   subscribeToAlerts,
   subscribeToDevices,
@@ -175,6 +176,41 @@ export function DashboardPage() {
         })
       : () => {}
 
+    // Polling fallback: re-fetch devices every 30 s so the UI stays accurate
+    // even if a realtime event was dropped (e.g. network blip, subscription lag).
+    // This is the safety net — realtime still drives low-latency updates.
+    const pollInterval = isSupabaseConfigured
+      ? window.setInterval(async () => {
+          if (!isActive) return
+          const fresh = await getLiveDevices()
+          if (!isActive) return
+          setDevices((prev) => {
+            // Only update devices that have actually changed to avoid unnecessary re-renders
+            let changed = false
+            const next = prev.map((d) => {
+              const f = fresh.find((x) => x.id === d.id)
+              if (!f) return d
+              // Compare by serialising key fields rather than deep-equal
+              const same =
+                d.status === f.status &&
+                (d.meta as Record<string, unknown>)?.charger_power ===
+                  (f.meta as Record<string, unknown>)?.charger_power &&
+                (d.meta as Record<string, unknown>)?.contactor_feedback ===
+                  (f.meta as Record<string, unknown>)?.contactor_feedback
+              if (same) return d
+              changed = true
+              return f
+            })
+            if (!changed) return prev
+            setAlerts((prevAlerts) => {
+              const dbAlerts = prevAlerts.filter((a) => !a.id.startsWith('synth-'))
+              return [...generateContactorAlerts(next, dbAlerts), ...dbAlerts]
+            })
+            return next
+          })
+        }, 30_000)
+      : 0
+
     // Realtime alert subscription: adds new DB alerts and fires a local
     // push notification for critical/warning alerts received while the app
     // is in the background (supplements the gateway's push edge function call).
@@ -216,6 +252,7 @@ export function DashboardPage() {
       isActive = false
       unsubscribeDevices()
       unsubscribeAlerts()
+      if (pollInterval) window.clearInterval(pollInterval)
       timersRef.current.forEach((t) => window.clearTimeout(t))
       if (rearmTimerRef.current !== null) window.clearTimeout(rearmTimerRef.current)
     }
