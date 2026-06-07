@@ -47,8 +47,8 @@ self.addEventListener('push', (event) => {
   const data = payload.data ?? {}
   const options = {
     body: payload.body,
-    icon: payload.icon ?? '/app-icon.svg',
-    badge: payload.badge ?? '/app-icon.svg',
+    icon: payload.icon ?? '/app-icon2.png',
+    badge: payload.badge ?? '/app-icon2.png',
     tag: payload.tag,
     data,
     // Actions: browser/OS support varies; safe fallback is always notificationclick

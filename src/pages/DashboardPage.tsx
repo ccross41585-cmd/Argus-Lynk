@@ -195,8 +195,8 @@ export function DashboardPage() {
                 newAlert.severity === 'critical' ? '🚨 Argus Critical Alert' : '⚠️ Argus Alert',
                 {
                   body: newAlert.message,
-                  icon: '/app-icon.svg',
-                  badge: '/app-icon.svg',
+                  icon: '/app-icon2.png',
+                  badge: '/app-icon2.png',
                   tag: `alert-${newAlert.id}`,
                   requireInteraction: true,
                   data: { url: `/alerts/${newAlert.id}`, alertId: newAlert.id },
@@ -470,8 +470,8 @@ export function DashboardPage() {
     if (!reg) return
     await reg.showNotification('Fence Reminder ⚡', {
       body: 'The fence has been off for 1 minute. Would you like to arm it now?',
-      icon: '/app-icon.svg',
-      badge: '/app-icon.svg',
+      icon: '/app-icon2.png',
+      badge: '/app-icon2.png',
       tag: 'argus-fence-rearm',
       requireInteraction: true,
       data: { url: '/' },

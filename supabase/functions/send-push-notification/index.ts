@@ -369,8 +369,8 @@ serve(async (req: Request) => {
   const pushPayload = JSON.stringify({
     title: alertRow.title || 'Argus Lynk Alert',
     body: alertRow.message,
-    icon: '/app-icon.svg',
-    badge: '/app-icon.svg',
+    icon: '/app-icon2.png',
+    badge: '/app-icon2.png',
     tag: `alert-${alertRow.id}`,
     requireInteraction: alertRow.severity === 'critical' || alertRow.severity === 'warning',
     data: {
