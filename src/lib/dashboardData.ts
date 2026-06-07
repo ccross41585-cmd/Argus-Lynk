@@ -397,3 +397,38 @@ export function subscribeToDevices(
 
   return () => { void supabase!.removeChannel(channel) }
 }
+
+/**
+ * Subscribes to INSERT events on the alerts table.
+ * Calls onNew with a mapped AlertRecord whenever a new alert row is inserted.
+ * Returns a cleanup function to unsubscribe.
+ */
+export function subscribeToAlerts(
+  onNew: (alert: AlertRecord) => void,
+): () => void {
+  if (!supabase) return () => {}
+
+  const channel = supabase
+    .channel('dashboard-alerts')
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'alerts' },
+      (payload) => {
+        const row = payload.new as Record<string, unknown>
+        onNew({
+          id:             String(row.id),
+          device_id:      String(row.device_id ?? ''),
+          type:           String(row.severity ?? 'info'),
+          message:        String(row.message ?? ''),
+          severity:       (row.severity ?? 'info') as AlertRecord['severity'],
+          acknowledged:   row.status === 'acknowledged',
+          silenced_until: (row.silenced_until as string | null) ?? null,
+          created_at:     String(row.created_at),
+          resolved_at:    (row.resolved_at as string | null) ?? null,
+        })
+      },
+    )
+    .subscribe()
+
+  return () => { void supabase!.removeChannel(channel) }
+}

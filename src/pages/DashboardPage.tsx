@@ -23,6 +23,7 @@ import {
   generateContactorAlerts,
   getLiveDashboard,
   silenceLiveAlert,
+  subscribeToAlerts,
   subscribeToDevices,
 } from '../lib/dashboardData'
 import { isSupabaseConfigured, supabase } from '../lib/supabase'
@@ -159,7 +160,7 @@ export function DashboardPage() {
     void load()
 
     // Live realtime updates when Supabase is configured
-    const unsubscribe = isSupabaseConfigured
+    const unsubscribeDevices = isSupabaseConfigured
       ? subscribeToDevices((updated) => {
           setDevices((prev) => {
             const idx = prev.findIndex((d) => d.id === updated.id)
@@ -174,9 +175,47 @@ export function DashboardPage() {
         })
       : () => {}
 
+    // Realtime alert subscription: adds new DB alerts and fires a local
+    // push notification for critical/warning alerts received while the app
+    // is in the background (supplements the gateway's push edge function call).
+    const unsubscribeAlerts = isSupabaseConfigured
+      ? subscribeToAlerts(async (newAlert) => {
+          setAlerts((prev) => {
+            if (prev.some((a) => a.id === newAlert.id)) return prev
+            return [newAlert, ...prev]
+          })
+          if (
+            (newAlert.severity === 'critical' || newAlert.severity === 'warning') &&
+            'serviceWorker' in navigator &&
+            Notification.permission === 'granted'
+          ) {
+            const reg = await navigator.serviceWorker.getRegistration('/')
+            if (reg) {
+              await reg.showNotification(
+                newAlert.severity === 'critical' ? '🚨 Argus Critical Alert' : '⚠️ Argus Alert',
+                {
+                  body: newAlert.message,
+                  icon: '/app-icon.svg',
+                  badge: '/app-icon.svg',
+                  tag: `alert-${newAlert.id}`,
+                  requireInteraction: true,
+                  data: { url: `/alerts/${newAlert.id}`, alertId: newAlert.id },
+                  actions: [
+                    { action: 'open', title: 'View' },
+                    { action: 'silence', title: 'Silence' },
+                  ],
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                } as any,
+              )
+            }
+          }
+        })
+      : () => {}
+
     return () => {
       isActive = false
-      unsubscribe()
+      unsubscribeDevices()
+      unsubscribeAlerts()
       timersRef.current.forEach((t) => window.clearTimeout(t))
       if (rearmTimerRef.current !== null) window.clearTimeout(rearmTimerRef.current)
     }

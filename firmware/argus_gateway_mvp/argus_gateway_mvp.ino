@@ -988,8 +988,8 @@ void processHeartbeatIfReady() {
     powerLossAlertSent = true;
     createAndSendAlert(
       "critical",
-      "Fence Power Loss",
-      "Fence was commanded ON but the auxiliary contact (GPIO34) reports the contactor is not engaged. Check the fence power supply."
+      "Fence Charger Lost Power",
+      "The Field Lynk has detected that the fence charger lost power. Please check the power supply to the fence."
     );
   }
 
@@ -998,8 +998,8 @@ void processHeartbeatIfReady() {
     powerLossAlertSent = true;
     createAndSendAlert(
       "warning",
-      "Fence Contactor Stuck ON",
-      "Fence was commanded OFF but the auxiliary contact (GPIO34) still reports the contactor is engaged."
+      "Fence Contactor Fault",
+      "The fence was turned off but the Field Lynk is still detecting voltage on the fence line. Please check the fence controller."
     );
   }
 
@@ -1101,8 +1101,8 @@ void loop() {
 
     createAndSendAlert(
       "critical",
-      "Field Node Offline",
-      "The fence field node has not sent a heartbeat in over 75 seconds. It may have lost power or LoRa connectivity."
+      "Field Lynk Offline",
+      "The Field Lynk has stopped responding. Please check its power supply and make sure it is within range of the gateway."
     );
   }
 
