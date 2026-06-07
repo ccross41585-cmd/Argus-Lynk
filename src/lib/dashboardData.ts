@@ -67,13 +67,22 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
   const desired    = (row.desired_state    ?? '').toUpperCase()  // '' | 'ON' | 'OFF'
   const confirmed  = (row.confirmed_state  ?? '').toUpperCase()  // '' | 'ON' | 'OFF'
 
-  // Contactor feedback may be stored in metadata by a newer gateway build;
-  // fall back to the legacy confirmed_state label.
-  const contactorFeedback = (base.contactor_feedback as string | null) ?? (confirmed || '—')
+  // Contactor feedback stored in metadata by the gateway on each ACK / HB.
+  const contactorFeedback = (base.contactor_feedback as string | null) ?? '—'
+
+  // Use the physical contactor state when we have reliable aux feedback.
+  // CONFIRMED/STUCK_ON = contactor is physically closed (energized).
+  // FAILED/OPEN        = contactor is physically open (de-energized).
+  // Anything else      = fall back to the last commanded state from the gateway.
+  const chargerPower = (() => {
+    if (contactorFeedback === 'CONFIRMED' || contactorFeedback === 'STUCK_ON') return 'ON'
+    if (contactorFeedback === 'FAILED'    || contactorFeedback === 'OPEN')     return 'OFF'
+    return confirmed || desired || '—'
+  })()
 
   return {
     ...base,
-    charger_power:       confirmed || desired || '—',
+    charger_power:       chargerPower,
     relay_feedback:      confirmed || '—',
     last_command:        desired   || '—',
     contactor_feedback:  contactorFeedback,

@@ -540,7 +540,13 @@ void callPushEdgeFunction(const String& alertId) {
 
 // One-step: insert alert + fire push notifications.
 void createAndSendAlert(const String& severity, const String& title, const String& message) {
+  Serial.printf("[ALERT] %s: %s\n", severity.c_str(), title.c_str());
   String alertId = insertAlert(severity, title, message);
+  if (alertId.length() == 0) {
+    Serial.println("[ALERT] insertAlert failed — check anon key INSERT permission on alerts table.");
+    return;
+  }
+  Serial.printf("[ALERT] Inserted alert %s. Calling push edge function...\n", alertId.c_str());
   callPushEdgeFunction(alertId);
 }
 
@@ -1006,6 +1012,43 @@ void processHeartbeatIfReady() {
   radio.startReceive();
 }
 
+// Fetches the Supabase device UUID for the fence controller owned by this
+// gateway. Called once at boot so HB fault alerts and metadata updates work
+// even before any command has ever been processed.
+void fetchFenceDeviceId() {
+  String url = buildApiUrl(
+    String("devices?gateway_id=eq.") + GATEWAY_ID +
+    "&type=eq.fence_controller&select=id&limit=1"
+  );
+
+  HTTPClient http;
+  http.begin(url);
+  http.addHeader("apikey", SUPABASE_ANON_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
+  int statusCode = http.GET();
+  String payload = http.getString();
+  http.end();
+
+  if (statusCode < 200 || statusCode >= 300) {
+    Serial.printf("fetchFenceDeviceId: HTTP %d\n", statusCode);
+    return;
+  }
+
+  DynamicJsonDocument doc(256);
+  if (deserializeJson(doc, payload)) {
+    Serial.println("fetchFenceDeviceId: JSON parse error");
+    return;
+  }
+
+  if (!doc.is<JsonArray>() || doc.as<JsonArray>().size() == 0) {
+    Serial.println("fetchFenceDeviceId: no fence_controller found for this gateway_id. Check devices table.");
+    return;
+  }
+
+  cachedFenceDeviceId = String(doc[0]["id"].as<const char*>());
+  Serial.printf("Fence device ID: %s\n", cachedFenceDeviceId.c_str());
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -1016,6 +1059,7 @@ void setup() {
   drawScreen();
   connectToWifi();
   syncClock();
+  fetchFenceDeviceId();  // Populate cachedFenceDeviceId before first HB arrives.
   drawScreen();
   initializeLoRa();
 
