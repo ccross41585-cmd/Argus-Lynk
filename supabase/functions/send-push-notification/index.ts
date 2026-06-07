@@ -35,22 +35,6 @@ const VAPID_PUBLIC_KEY  = Deno.env.get('VAPID_PUBLIC_KEY')!
 const VAPID_PRIVATE_KEY = Deno.env.get('VAPID_PRIVATE_KEY')!
 const VAPID_SUBJECT     = Deno.env.get('VAPID_SUBJECT') ?? 'mailto:admin@arguslynk.com'
 
-/** Convert a base64url string to Uint8Array */
-function base64urlToUint8Array(b64: string): Uint8Array {
-  const padding = '='.repeat((4 - (b64.length % 4)) % 4)
-  const base64 = (b64 + padding).replace(/-/g, '+').replace(/_/g, '/')
-  const binary = atob(base64)
-  return new Uint8Array([...binary].map((c) => c.charCodeAt(0)))
-}
-
-/** Convert Uint8Array to base64url */
-function uint8ArrayToBase64url(arr: Uint8Array): string {
-  return btoa(String.fromCharCode(...arr))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '')
-}
-
 /** Build the VAPID Authorization header value for a given push endpoint origin */
 async function buildVapidAuthHeader(audience: string): Promise<string> {
   const expiry = Math.floor(Date.now() / 1000) + 12 * 3600  // 12h
@@ -59,13 +43,10 @@ async function buildVapidAuthHeader(audience: string): Promise<string> {
   const claims = { aud: audience, exp: expiry, sub: VAPID_SUBJECT }
 
   const encode = (obj: unknown) =>
-    uint8ArrayToBase64url(new TextEncoder().encode(JSON.stringify(obj)))
+    b64uEncode(new TextEncoder().encode(JSON.stringify(obj)))
 
   const signingInput = `${encode(header)}.${encode(claims)}`
 
-  // Import private key (uncompressed EC P-256 raw/pkcs8 or JWK)
-  // Supabase VAPID secrets are typically stored as base64url raw private scalar.
-  // For simplicity we expect them as JWK JSON string in the env var.
   let privateKey: CryptoKey
   try {
     const jwk = JSON.parse(VAPID_PRIVATE_KEY) as JsonWebKey
@@ -78,7 +59,7 @@ async function buildVapidAuthHeader(audience: string): Promise<string> {
     )
   } catch {
     // Fallback: treat as raw base64url scalar
-    const rawBytes = base64urlToUint8Array(VAPID_PRIVATE_KEY)
+    const rawBytes = b64uDecode(VAPID_PRIVATE_KEY)
     privateKey = await crypto.subtle.importKey(
       'raw',
       rawBytes,
@@ -94,8 +75,147 @@ async function buildVapidAuthHeader(audience: string): Promise<string> {
     new TextEncoder().encode(signingInput),
   )
 
-  const token = `${signingInput}.${uint8ArrayToBase64url(new Uint8Array(signatureBytes))}`
+  const token = `${signingInput}.${b64uEncode(new Uint8Array(signatureBytes))}`
   return `vapid t=${token},k=${VAPID_PUBLIC_KEY}`
+}
+
+// ── RFC 8291 payload encryption ───────────────────────────────────────────────
+// Implements the Web Push Message Encryption spec (RFC 8291) using the
+// "aes128gcm" content encoding required by Chrome on Android.
+
+/** Decode a base64url string to Uint8Array, tolerating standard base64 too */
+function b64uDecode(b64: string): Uint8Array {
+  const padding = '='.repeat((4 - (b64.length % 4)) % 4)
+  const std = (b64 + padding).replace(/-/g, '+').replace(/_/g, '/')
+  const bin = atob(std)
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0))
+}
+
+/** Encode Uint8Array as base64url */
+function b64uEncode(buf: Uint8Array): string {
+  return btoa(String.fromCharCode(...buf))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+}
+
+/**
+ * Encrypt a Web Push payload per RFC 8291 / draft-ietf-webpush-encryption.
+ *
+ * Returns the encrypted body bytes with the aes128gcm binary header prepended,
+ * ready to POST with Content-Encoding: aes128gcm.
+ */
+async function encryptPushPayload(
+  plaintext: string,
+  p256dhBase64url: string,
+  authBase64url: string,
+): Promise<Uint8Array> {
+  const enc = new TextEncoder()
+
+  // Subscription keys
+  const receiverPublicKeyBytes = b64uDecode(p256dhBase64url)  // 65-byte uncompressed P-256 point
+  const authSecret = b64uDecode(authBase64url)                 // 16 bytes
+
+  // 1. Generate ephemeral sender key pair (P-256)
+  const senderKeyPair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveKey', 'deriveBits'],
+  )
+
+  // Export sender public key as raw uncompressed point (65 bytes)
+  const senderPublicKeyRaw = new Uint8Array(
+    await crypto.subtle.exportKey('raw', senderKeyPair.publicKey),
+  )
+
+  // Import receiver public key for ECDH
+  const receiverPublicKey = await crypto.subtle.importKey(
+    'raw',
+    receiverPublicKeyBytes,
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    [],
+  )
+
+  // 2. ECDH shared secret (32 bytes)
+  const sharedSecretBits = await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: receiverPublicKey },
+    senderKeyPair.privateKey,
+    256,
+  )
+  const sharedSecret = new Uint8Array(sharedSecretBits)
+
+  // 3. Generate random 16-byte salt
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+
+  // 4. HKDF-SHA-256 — PRK via Extract using authSecret as salt
+  const hmacKey = await crypto.subtle.importKey(
+    'raw', authSecret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  )
+  const prkBytes = new Uint8Array(await crypto.subtle.sign('HMAC', hmacKey, sharedSecret))
+  const prk = await crypto.subtle.importKey(
+    'raw', prkBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  )
+
+  // 5. Key material via HKDF Expand
+  // info = "WebPush: info\x00" + receiverPublicKeyBytes + senderPublicKeyRaw
+  const keyInfoPrefix = enc.encode('WebPush: info\x00')
+  const keyInfo = new Uint8Array(keyInfoPrefix.length + receiverPublicKeyBytes.length + senderPublicKeyRaw.length)
+  keyInfo.set(keyInfoPrefix, 0)
+  keyInfo.set(receiverPublicKeyBytes, keyInfoPrefix.length)
+  keyInfo.set(senderPublicKeyRaw, keyInfoPrefix.length + receiverPublicKeyBytes.length)
+
+  const ikmInput = new Uint8Array(keyInfo.length + 1)
+  ikmInput.set(keyInfo, 0)
+  ikmInput[keyInfo.length] = 0x01
+  const ikmRaw = new Uint8Array(await crypto.subtle.sign('HMAC', prk, ikmInput))
+
+  // 6. CEK and nonce via second HKDF with salt
+  const saltKey = await crypto.subtle.importKey(
+    'raw', salt, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  )
+  const prkCek = await crypto.subtle.importKey(
+    'raw',
+    new Uint8Array(await crypto.subtle.sign('HMAC', saltKey, ikmRaw)),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+
+  const cekInfo = new Uint8Array([...enc.encode('Content-Encoding: aes128gcm\x00'), 0x01])
+  const cekRaw = (new Uint8Array(await crypto.subtle.sign('HMAC', prkCek, cekInfo))).slice(0, 16)
+
+  const nonceInfo = new Uint8Array([...enc.encode('Content-Encoding: nonce\x00'), 0x01])
+  const nonce = (new Uint8Array(await crypto.subtle.sign('HMAC', prkCek, nonceInfo))).slice(0, 12)
+
+  // 7. AES-128-GCM encrypt
+  const cek = await crypto.subtle.importKey('raw', cekRaw, { name: 'AES-GCM' }, false, ['encrypt'])
+
+  // Pad plaintext: append 0x02 delimiter + zero-padding to a fixed record size
+  const plaintextBytes = enc.encode(plaintext)
+  const recordSize = 4096
+  const paddedLen = recordSize - 16  // AES-GCM tag is 16 bytes
+  const padded = new Uint8Array(paddedLen)
+  padded.set(plaintextBytes, 0)
+  padded[plaintextBytes.length] = 0x02  // RFC 8291 delimiter
+
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, cek, padded),
+  )
+
+  // 8. Build aes128gcm binary header:
+  //    salt (16) | rs (4, big-endian uint32) | idlen (1) | keyid (senderPublicKeyRaw, 65)
+  const rs = recordSize
+  const header = new Uint8Array(16 + 4 + 1 + senderPublicKeyRaw.length)
+  header.set(salt, 0)
+  const rsView = new DataView(header.buffer, 16, 4)
+  rsView.setUint32(0, rs, false)  // big-endian
+  header[20] = senderPublicKeyRaw.length
+  header.set(senderPublicKeyRaw, 21)
+
+  // Concatenate header + ciphertext
+  const result = new Uint8Array(header.length + ciphertext.length)
+  result.set(header, 0)
+  result.set(ciphertext, header.length)
+  return result
 }
 
 // ── Push sender ───────────────────────────────────────────────────────────────
@@ -114,19 +234,23 @@ async function sendWebPush(
     return { status: 0, error: `VAPID sign error: ${(err as Error).message}` }
   }
 
-  // Note: payload encryption (RFC 8291 / web-push content encoding) requires
-  // the p256dh/auth keys and AES-GCM.  For a production implementation, use a
-  // full web-push library (e.g. https://deno.land/x/web_push).
-  // We send an unencrypted payload here; browsers will accept it for same-origin
-  // service workers when content-encoding is omitted (plain text).
+  // RFC 8291 encrypted payload — required by Chrome on Android
+  let encryptedBody: Uint8Array
+  try {
+    encryptedBody = await encryptPushPayload(payloadJson, sub.p256dh, sub.auth)
+  } catch (err) {
+    return { status: 0, error: `Encryption error: ${(err as Error).message}` }
+  }
+
   const response = await fetch(sub.endpoint, {
     method: 'POST',
     headers: {
       'Authorization': vapidAuth,
       'TTL': '86400',
-      'Content-Type': 'application/json',
+      'Content-Encoding': 'aes128gcm',
+      'Content-Type': 'application/octet-stream',
     },
-    body: payloadJson,
+    body: encryptedBody,
   })
 
   if (!response.ok) {
