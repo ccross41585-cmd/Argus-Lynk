@@ -59,7 +59,17 @@ function SwipeableAlertRow({
     >
       <div className="alert-row-flat__copy">
         <StatusPill tone={tone}>{alert.severity}</StatusPill>
-        <span>{alert.message}</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+          <span>{alert.message}</span>
+          {alert.created_at && (
+            <span style={{ fontSize: '0.72rem', color: 'var(--muted)', fontVariantNumeric: 'tabular-nums' }}>
+              {new Date(alert.created_at).toLocaleString(undefined, {
+                month: 'short', day: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+              })}
+            </span>
+          )}
+        </div>
       </div>
       <button
         type="button"

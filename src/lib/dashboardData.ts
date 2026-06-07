@@ -291,6 +291,7 @@ export async function getLiveAlerts(): Promise<AlertRecord[]> {
     .from('alerts')
     .select('*')
     .is('resolved_at', null)
+    .not('status', 'in', '("acknowledged","silenced")')
     .order('created_at', { ascending: false })
   if (error || !data) {
     console.error('getLiveAlerts:', error?.message)
@@ -356,9 +357,10 @@ export async function createLiveCommand(
 
 export async function acknowledgeLiveAlert(alertId: string): Promise<void> {
   if (!supabase) return
+  const now = new Date().toISOString()
   await supabase
     .from('alerts')
-    .update({ status: 'acknowledged', acknowledged_at: new Date().toISOString() })
+    .update({ status: 'acknowledged', acknowledged_at: now, resolved_at: now })
     .eq('id', alertId)
 }
 
