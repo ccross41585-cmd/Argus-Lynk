@@ -6,22 +6,38 @@ create extension if not exists pgcrypto;
 
 create table if not exists public.devices (
   id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
   tenant_id uuid null,
   name text not null,
   type text not null,
+  device_type text null,
+  status text null,
   location text null,
   enabled boolean not null default true,
   sort_order int not null default 0,
+  device_key text null,
   gateway_id text null,
   desired_state text null,
   confirmed_state text null,
   online boolean not null default false,
   last_seen timestamptz null,
+  last_seen_at timestamptz null,
+  firmware_version text null,
   rssi numeric null,
   battery_voltage numeric null,
   metadata jsonb null,
   updated_at timestamptz not null default now()
 );
+
+create unique index if not exists idx_devices_device_key_unique
+  on public.devices (device_key)
+  where device_key is not null;
+
+create index if not exists idx_devices_device_type
+  on public.devices (device_type);
+
+create index if not exists idx_devices_status
+  on public.devices (status);
 
 create table if not exists public.device_commands (
   id uuid primary key default gen_random_uuid(),
@@ -133,3 +149,64 @@ where not exists (
   from public.devices
   where name = 'North Fence'
 );
+
+create table if not exists public.freezer_temperature_logs (
+  id uuid primary key default gen_random_uuid(),
+  tenant_id uuid null,
+  device_id uuid not null references public.devices(id) on delete cascade,
+  temperature_f numeric(8,3) not null,
+  temperature_c numeric(8,3) not null,
+  raw_sensor_value text null,
+  signal_strength numeric null,
+  battery_voltage numeric null,
+  battery_percent numeric null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_freezer_logs_tenant
+  on public.freezer_temperature_logs (tenant_id);
+
+create index if not exists idx_freezer_logs_device_created_desc
+  on public.freezer_temperature_logs (device_id, created_at desc);
+
+create index if not exists idx_freezer_logs_tenant_device_created_desc
+  on public.freezer_temperature_logs (tenant_id, device_id, created_at desc);
+
+create table if not exists public.freezer_lynk_settings (
+  device_id uuid primary key references public.devices(id) on delete cascade,
+  tenant_id uuid null,
+  temp_alarm_high_f numeric(8,3) not null default 10,
+  temp_warning_high_f numeric(8,3) not null default 5,
+  alert_delay_minutes int not null default 5,
+  heartbeat_minutes int not null default 5,
+  offline_after_minutes int not null default 15,
+  logging_interval_minutes int not null default 5,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_freezer_settings_tenant
+  on public.freezer_lynk_settings (tenant_id);
+
+create table if not exists public.device_telemetry_state (
+  device_id uuid primary key references public.devices(id) on delete cascade,
+  tenant_id uuid null,
+  device_type text not null,
+  transport text null,
+  last_state text not null default 'ok',
+  warning_started_at timestamptz null,
+  alarm_started_at timestamptz null,
+  alarm_active boolean not null default false,
+  last_reading_at timestamptz null,
+  last_alert_id uuid null references public.alerts(id) on delete set null,
+  last_recovery_at timestamptz null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_device_telemetry_state_tenant
+  on public.device_telemetry_state (tenant_id);
+
+create index if not exists idx_device_telemetry_state_type
+  on public.device_telemetry_state (device_type);

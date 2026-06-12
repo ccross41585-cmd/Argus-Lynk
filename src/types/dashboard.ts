@@ -82,7 +82,7 @@ export interface DashboardDevice {
   pinned?: boolean
   status: DeviceHealthStatus
   last_seen: string
-  metadata: Record<string, string | number | boolean | null>
+  metadata: Record<string, string | number | boolean | null | number[]>
 }
 
 export interface DeviceStatusRecord {

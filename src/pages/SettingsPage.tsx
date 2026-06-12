@@ -29,6 +29,7 @@ import { maskProjectUrl } from '../lib/display'
 import { isSupabaseConfigured, supabase, supabaseUrl } from '../lib/supabase'
 import { geocodeLocation, type GeoResult } from '../lib/weather'
 import { loadUserProfile, saveUserLocation } from '../lib/userProfile'
+import { getLiveDevices } from '../lib/dashboardData'
 import { getDashboardStatus, getDevices } from '../lib/dashboardMock'
 import type { DashboardDevice } from '../types/dashboard'
 
@@ -51,6 +52,7 @@ interface WizardState {
   deviceType: DeviceTypeChoice | null
   pairingMethod: PairingMethod | null
   detectedNodeId: string
+  deviceKey: string
   signalStrength: string
   displayName: string
   location: string
@@ -62,6 +64,7 @@ const WIZARD_INIT: WizardState = {
   deviceType: null,
   pairingMethod: null,
   detectedNodeId: '',
+  deviceKey: '',
   signalStrength: '',
   displayName: '',
   location: '',
@@ -71,7 +74,7 @@ const WIZARD_INIT: WizardState = {
 const DEVICE_TYPE_OPTIONS: { value: DeviceTypeChoice; label: string; abbr: string }[] = [
   { value: 'fence',     label: 'Fence Controller',      abbr: 'FEN' },
   { value: 'well_pump', label: 'Well Pump Controller',  abbr: 'PMP' },
-  { value: 'freezer',   label: 'Freezer Sensor',        abbr: 'FRZ' },
+  { value: 'freezer',   label: 'Freezer Lynk',          abbr: 'FRZ' },
   { value: 'driveway',  label: 'Driveway Alarm',        abbr: 'DRV' },
   { value: 'weather',   label: 'Weather Station',       abbr: 'WX' },
   { value: 'custom',    label: 'Custom Node',           abbr: 'CST' },
@@ -88,6 +91,23 @@ const DETECTED_NODE = {
   signal: '-72 dBm (Good)',
   battery: '4.1V',
   lastSeen: 'just now',
+}
+
+function toDbDeviceType(type: DeviceTypeChoice): string {
+  switch (type) {
+    case 'fence': return 'fence_controller'
+    case 'well_pump': return 'pump_controller'
+    case 'freezer': return 'freezer_lynk'
+    case 'driveway': return 'driveway_alarm'
+    case 'weather': return 'weather_station'
+    default: return 'custom'
+  }
+}
+
+function isMissingTenantColumnError(message: string | undefined): boolean {
+  const text = String(message ?? '').toLowerCase()
+  if (!text.includes('tenant_id')) return false
+  return text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find the')
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -166,11 +186,15 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
       .catch(() => { /* silent */ })
   }, [userId])
 
-  // ── Load mock data ────────────────────────────────────────────────────────
+  // ── Load registered devices ───────────────────────────────────────────────
   useEffect(() => {
-    if (!localMode) return
-    getDashboardStatus().then((status) => setQueueDepth(status.system.queueDepth))
-    getDevices().then(setDevices)
+    if (localMode) {
+      getDashboardStatus().then((status) => setQueueDepth(status.system.queueDepth))
+      getDevices().then(setDevices)
+      return
+    }
+    if (!isSupabaseConfigured) return
+    void getLiveDevices().then(setDevices)
   }, [localMode])
 
   // ── Geocoding ─────────────────────────────────────────────────────────────
@@ -235,6 +259,7 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
           ...w,
           step: 'configure',
           detectedNodeId: DETECTED_NODE.nodeId,
+          deviceKey: DETECTED_NODE.nodeId.toLowerCase(),
           signalStrength: DETECTED_NODE.signal,
         }))
       }, 2000)
@@ -244,13 +269,76 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
         step: 'configure',
         pairingMethod: method,
         detectedNodeId: method === 'qr' ? DETECTED_NODE.nodeId : '',
+        deviceKey: method === 'qr' ? DETECTED_NODE.nodeId.toLowerCase() : '',
         signalStrength: method === 'qr' ? DETECTED_NODE.signal : '',
       }))
     }
   }
 
-  function wizardSave() {
+  async function wizardSave() {
     const name = wizard.displayName.trim() || `${wizard.deviceType ?? 'Device'}-new`
+    const dbType = toDbDeviceType(wizard.deviceType ?? 'custom')
+    const manualDeviceKey = wizard.deviceKey.trim() || wizard.detectedNodeId.trim() || null
+
+    if (!localMode && supabase) {
+      const defaultLocation = wizard.location.trim() || savedLocation || null
+      const payload = {
+        name,
+        type: dbType,
+        device_type: dbType,
+        device_key: manualDeviceKey,
+        location: defaultLocation,
+        enabled: true,
+        online: false,
+        status: 'offline',
+        metadata: {
+          owner_user_id: userId,
+          owner_location_label: defaultLocation,
+        },
+      }
+
+      let insertData: { id: string } | null = null
+      let insertError: { message: string } | null = null
+
+      const ownerPayload = userId
+        ? { ...payload, tenant_id: userId }
+        : payload
+
+      const firstInsert = await supabase
+        .from('devices')
+        .insert(ownerPayload)
+        .select('id')
+        .single()
+
+      if (firstInsert.error && userId && isMissingTenantColumnError(firstInsert.error.message)) {
+        const fallbackInsert = await supabase
+          .from('devices')
+          .insert(payload)
+          .select('id')
+          .single()
+        insertData = fallbackInsert.data as { id: string } | null
+        insertError = fallbackInsert.error ? { message: fallbackInsert.error.message } : null
+      } else {
+        insertData = firstInsert.data as { id: string } | null
+        insertError = firstInsert.error ? { message: firstInsert.error.message } : null
+      }
+
+      if (insertError || !insertData) {
+        setAddedDevice(`Failed to add device: ${insertError?.message ?? 'Unknown insert failure'}`)
+        setWizard((w) => ({ ...w, step: 'done' }))
+        return
+      }
+
+      if (dbType === 'freezer_lynk') {
+        await supabase
+          .from('freezer_lynk_settings')
+          .upsert({ device_id: insertData.id })
+      }
+
+      const fresh = await getLiveDevices()
+      setDevices(fresh)
+    }
+
     setAddedDevice(name)
     setWizard({ ...WIZARD_INIT, step: 'done' })
   }
@@ -655,6 +743,20 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
                   </div>
                 )}
 
+                {wizard.deviceType === 'freezer' && (
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    <label className="label" htmlFor="wizard-device-key">Freezer Device Key</label>
+                    <input
+                      id="wizard-device-key"
+                      className="settings-location-input"
+                      type="text"
+                      placeholder="e.g. freezer-node-001"
+                      value={wizard.deviceKey}
+                      onChange={(e) => setWizard((w) => ({ ...w, deviceKey: e.target.value }))}
+                    />
+                  </div>
+                )}
+
                 <div style={{ display: 'grid', gap: 6 }}>
                   <label className="label" htmlFor="wizard-display-name">Display Name</label>
                   <input
@@ -691,8 +793,8 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
                 <button
                   type="button"
                   className="action-button"
-                  onClick={wizardSave}
-                  disabled={!wizard.displayName.trim()}
+                  onClick={() => void wizardSave()}
+                  disabled={!wizard.displayName.trim() || (wizard.deviceType === 'freezer' && !wizard.deviceKey.trim())}
                 >
                   Save Device
                 </button>

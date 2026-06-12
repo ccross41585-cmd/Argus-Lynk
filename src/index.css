@@ -2132,3 +2132,49 @@ details.dev-diagnostics[open] summary .chevron-icon {
     padding: 18px 16px;
   }
 }
+
+  /* ── Freezer Lynk trend lines ─────────────────────────────────────────────── */
+
+  .device-tile__sparkline {
+    margin-top: 8px;
+    height: 28px;
+    opacity: 0.9;
+  }
+
+  .device-tile__sparkline svg,
+  .freezer-mini-trend svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  .device-tile__sparkline path,
+  .freezer-mini-trend path {
+    fill: none;
+    stroke: #7dc4ff;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .freezer-mini-trend {
+    margin-top: 8px;
+    height: 28px;
+    border-top: 1px solid rgba(130, 150, 180, 0.18);
+    padding-top: 8px;
+  }
+
+  .freezer-detail-chart {
+    width: 100%;
+    height: 96px;
+    border: 1px solid rgba(130, 150, 180, 0.16);
+    border-radius: 10px;
+    background: rgba(11, 18, 28, 0.45);
+  }
+
+  .freezer-detail-chart path {
+    fill: none;
+    stroke: #7dc4ff;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }

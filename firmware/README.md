@@ -4,6 +4,7 @@ This folder contains two Arduino sketches for the first hardware integration pas
 
 - `argus_gateway_mvp`: ESP32 home-base gateway that polls Supabase every 5 seconds and forwards pending commands over LoRa.
 - `argus_field_node_mvp`: ESP32 field node that receives LoRa commands, switches a relay, and sends an ACK.
+- `freezer_lynk_wifi_mvp`: ESP32 freezer alarm node using a DS18B20 probe and WiFi telemetry posting.
 
 ## Required Arduino Libraries
 
@@ -18,6 +19,35 @@ The gateway sketch also uses the built-in ESP32 libraries:
 - `HTTPClient.h`
 - `Wire.h`
 - `time.h`
+
+The Freezer Lynk WiFi sketch uses:
+
+- `WiFi.h`
+- `HTTPClient.h`
+- `OneWire.h`
+- `DallasTemperature.h`
+
+## Freezer Lynk WiFi MVP
+
+Sketch path:
+
+- `firmware/freezer_lynk_wifi_mvp/freezer_lynk_wifi_mvp.ino`
+
+Hardware assumptions:
+
+- ESP32-WROOM-32 dev board
+- DS18B20 waterproof probe on configurable GPIO
+- 4.7k pull-up between DATA and 3.3V (or adapter board with integrated resistor)
+- Optional RGB LED (R/G/B pins configurable in sketch)
+
+Behavior:
+
+- Reads DS18B20 every 5 minutes
+- Rejects known invalid DS18B20 values (`-127°C`, `85°C`, approx `-196.6°F`, `185°F`)
+- Retries WiFi and posts telemetry JSON to Supabase edge function
+- Green short flash on successful send
+- Red flash on send failure or high local alarm threshold
+- Blue blink while WiFi is disconnected (pairing/config mode indicator)
 
 ## Before Flashing
 

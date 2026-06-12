@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Pencil, X, Check } from 'lucide-react'
 import { DrivewayAlarmCard } from '../components/dashboard/DrivewayAlarmCard'
@@ -25,6 +25,39 @@ import { isSupabaseConfigured, supabase } from '../lib/supabase'
 import type { AlertRecord, CommandRecord, DashboardDevice, DashboardOverview } from '../types/dashboard'
 
 type ModalPhase = 'question' | 'extended' | 'silenced' | 'awaiting-confirmation' | 'confirmed' | 'failed'
+
+type FreezerLogPoint = {
+  temperature_f: number
+  created_at: string
+}
+
+type FreezerSettings = {
+  temp_alarm_high_f: number
+  temp_warning_high_f: number
+  alert_delay_minutes: number
+  heartbeat_minutes: number
+  offline_after_minutes: number
+  logging_interval_minutes: number
+  enabled: boolean
+}
+
+function isFreezerType(type: string | null | undefined) {
+  const normalized = String(type ?? '').toLowerCase()
+  return normalized === 'freezer_lynk' || normalized === 'freezer_alarm' || normalized === 'freezer'
+}
+
+function linePath(points: number[], width = 300, height = 90): string {
+  if (points.length < 2) return ''
+  const min = Math.min(...points)
+  const max = Math.max(...points)
+  const span = Math.max(max - min, 0.0001)
+  const step = width / (points.length - 1)
+  return points.map((p, i) => {
+    const x = i * step
+    const y = height - ((p - min) / span) * (height - 4) - 2
+    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+  }).join(' ')
+}
 
 const mockShutoffWillConfirm = true
 
@@ -249,6 +282,11 @@ export function DeviceDetailPage() {
   const [device, setDevice] = useState<Device | null>(null)
   const [latestCommand, setLatestCommand] = useState<DeviceCommand | null>(null)
   const [events, setEvents] = useState<DeviceEvent[]>([])
+  const [alertHistory, setAlertHistory] = useState<Array<Record<string, unknown>>>([])
+  const [freezerHistory24h, setFreezerHistory24h] = useState<FreezerLogPoint[]>([])
+  const [freezerHistory7d, setFreezerHistory7d] = useState<FreezerLogPoint[]>([])
+  const [freezerSettings, setFreezerSettings] = useState<FreezerSettings | null>(null)
+  const [isSavingFreezerSettings, setIsSavingFreezerSettings] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -270,7 +308,7 @@ export function DeviceDetailPage() {
     async function loadDeviceState() {
       setActionError(null)
 
-      const [deviceResponse, commandResponse, eventResponse] = await Promise.all([
+      const [deviceResponse, commandResponse, eventResponse, alertsResponse] = await Promise.all([
         client.from('devices').select('*').eq('id', deviceId).single(),
         client
           .from('device_commands')
@@ -285,6 +323,12 @@ export function DeviceDetailPage() {
           .eq('device_id', deviceId)
           .order('created_at', { ascending: false })
           .limit(8),
+        client
+          .from('alerts')
+          .select('*')
+          .eq('device_id', deviceId)
+          .order('created_at', { ascending: false })
+          .limit(20),
       ])
 
       if (!isActive) {
@@ -305,9 +349,46 @@ export function DeviceDetailPage() {
         setActionError(eventResponse.error.message)
       }
 
-      setDevice(deviceResponse.data as Device)
+      const loadedDevice = deviceResponse.data as Device
+      setDevice(loadedDevice)
       setLatestCommand((commandResponse.data ?? null) as DeviceCommand | null)
       setEvents((eventResponse.data ?? []) as DeviceEvent[])
+      setAlertHistory((alertsResponse.data ?? []) as Array<Record<string, unknown>>)
+
+      if (isFreezerType(loadedDevice.type)) {
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+        const [historyRes, settingsRes] = await Promise.all([
+          client
+            .from('freezer_temperature_logs')
+            .select('temperature_f, created_at')
+            .eq('device_id', loadedDevice.id)
+            .gte('created_at', sevenDaysAgo)
+            .order('created_at', { ascending: true })
+            .limit(3000),
+          client
+            .from('freezer_lynk_settings')
+            .select('temp_alarm_high_f, temp_warning_high_f, alert_delay_minutes, heartbeat_minutes, offline_after_minutes, logging_interval_minutes, enabled')
+            .eq('device_id', loadedDevice.id)
+            .maybeSingle(),
+        ])
+
+        if (!historyRes.error && historyRes.data) {
+          const points = historyRes.data as FreezerLogPoint[]
+          setFreezerHistory7d(points)
+          setFreezerHistory24h(points.filter((p) => p.created_at >= oneDayAgo))
+        }
+
+        if (!settingsRes.error && settingsRes.data) {
+          setFreezerSettings(settingsRes.data as FreezerSettings)
+        }
+      } else {
+        setFreezerHistory24h([])
+        setFreezerHistory7d([])
+        setFreezerSettings(null)
+      }
+
       setIsLoading(false)
     }
 
@@ -400,6 +481,29 @@ export function DeviceDetailPage() {
     setIsEditingName(false)
   }
 
+  async function saveFreezerSettings() {
+    if (!supabase || !device || !freezerSettings) return
+    setIsSavingFreezerSettings(true)
+    const { error } = await supabase
+      .from('freezer_lynk_settings')
+      .upsert({
+        device_id: device.id,
+        temp_alarm_high_f: freezerSettings.temp_alarm_high_f,
+        temp_warning_high_f: freezerSettings.temp_warning_high_f,
+        alert_delay_minutes: freezerSettings.alert_delay_minutes,
+        heartbeat_minutes: freezerSettings.heartbeat_minutes,
+        offline_after_minutes: freezerSettings.offline_after_minutes,
+        logging_interval_minutes: freezerSettings.logging_interval_minutes,
+        enabled: freezerSettings.enabled,
+      })
+    setIsSavingFreezerSettings(false)
+    if (error) {
+      setActionError(`Failed to save freezer settings: ${error.message}`)
+      return
+    }
+    setActionMessage('Freezer Lynk settings updated.')
+  }
+
   async function sendCommand(command: 'turn_on' | 'turn_off') {
     if (!supabase || !device) {
       return
@@ -438,6 +542,13 @@ export function DeviceDetailPage() {
     setLatestCommand(data as DeviceCommand)
     setActionMessage('Command queued. Waiting for confirmation from the gateway...')
   }
+
+  const isFreezerDevice = useMemo(() => isFreezerType(device?.type), [device?.type])
+  const freezerCurrentTemp = freezerHistory24h.length > 0
+    ? freezerHistory24h[freezerHistory24h.length - 1].temperature_f
+    : null
+  const freezer24hPath = linePath(freezerHistory24h.map((p) => p.temperature_f))
+  const freezer7dPath = linePath(freezerHistory7d.map((p) => p.temperature_f))
 
   if (!isSupabaseConfigured) {
     return <LocalDeviceDetail deviceId={deviceId ?? ''} />
@@ -625,6 +736,134 @@ export function DeviceDetailPage() {
           )}
         </article>
       </section>
+
+      {isFreezerDevice && (
+        <section className="detail-grid">
+          <article className="panel detail-card stack">
+            <div>
+              <p className="eyebrow">Freezer Lynk</p>
+              <h2>Temperature & Thresholds</h2>
+            </div>
+
+            <div className="key-value-grid">
+              <div className="key-value-item">
+                <span className="label">Current Temp</span>
+                <strong>{freezerCurrentTemp === null ? '—' : `${freezerCurrentTemp.toFixed(1)}°F`}</strong>
+              </div>
+              <div className="key-value-item">
+                <span className="label">Samples (24h)</span>
+                <strong>{freezerHistory24h.length}</strong>
+              </div>
+              <div className="key-value-item">
+                <span className="label">Alarm Threshold</span>
+                <strong>{freezerSettings ? `${freezerSettings.temp_alarm_high_f.toFixed(1)}°F` : '—'}</strong>
+              </div>
+              <div className="key-value-item">
+                <span className="label">Warning Threshold</span>
+                <strong>{freezerSettings ? `${freezerSettings.temp_warning_high_f.toFixed(1)}°F` : '—'}</strong>
+              </div>
+            </div>
+
+            {freezerSettings && (
+              <div className="stack">
+                <div className="key-value-grid">
+                  <label className="key-value-item">
+                    <span className="label">Alarm °F</span>
+                    <input
+                      className="settings-location-input"
+                      type="number"
+                      step="0.1"
+                      value={freezerSettings.temp_alarm_high_f}
+                      onChange={(e) => setFreezerSettings((s) => s ? { ...s, temp_alarm_high_f: Number(e.target.value) } : s)}
+                    />
+                  </label>
+                  <label className="key-value-item">
+                    <span className="label">Warning °F</span>
+                    <input
+                      className="settings-location-input"
+                      type="number"
+                      step="0.1"
+                      value={freezerSettings.temp_warning_high_f}
+                      onChange={(e) => setFreezerSettings((s) => s ? { ...s, temp_warning_high_f: Number(e.target.value) } : s)}
+                    />
+                  </label>
+                  <label className="key-value-item">
+                    <span className="label">Alert Delay (min)</span>
+                    <input
+                      className="settings-location-input"
+                      type="number"
+                      min={1}
+                      value={freezerSettings.alert_delay_minutes}
+                      onChange={(e) => setFreezerSettings((s) => s ? { ...s, alert_delay_minutes: Number(e.target.value) } : s)}
+                    />
+                  </label>
+                  <label className="key-value-item">
+                    <span className="label">Offline After (min)</span>
+                    <input
+                      className="settings-location-input"
+                      type="number"
+                      min={1}
+                      value={freezerSettings.offline_after_minutes}
+                      onChange={(e) => setFreezerSettings((s) => s ? { ...s, offline_after_minutes: Number(e.target.value) } : s)}
+                    />
+                  </label>
+                </div>
+
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={isSavingFreezerSettings}
+                  onClick={() => void saveFreezerSettings()}
+                >
+                  {isSavingFreezerSettings ? 'Saving…' : 'Save Settings'}
+                </button>
+              </div>
+            )}
+          </article>
+
+          <article className="panel detail-card stack">
+            <div>
+              <p className="eyebrow">Reading History</p>
+              <h2>Last 24h & Last 7d</h2>
+            </div>
+
+            <div>
+              <p className="label" style={{ marginBottom: 6 }}>24 Hours</p>
+              {freezer24hPath ? (
+                <svg viewBox="0 0 300 90" className="freezer-detail-chart" preserveAspectRatio="none">
+                  <path d={freezer24hPath} />
+                </svg>
+              ) : <div className="empty-state">Not enough points yet.</div>}
+            </div>
+
+            <div>
+              <p className="label" style={{ marginBottom: 6 }}>7 Days</p>
+              {freezer7dPath ? (
+                <svg viewBox="0 0 300 90" className="freezer-detail-chart" preserveAspectRatio="none">
+                  <path d={freezer7dPath} />
+                </svg>
+              ) : <div className="empty-state">No 7-day history yet.</div>}
+            </div>
+
+            <div>
+              <p className="eyebrow" style={{ marginBottom: 8 }}>Alert History</p>
+              {alertHistory.length === 0 ? (
+                <div className="empty-state">No alerts yet for this freezer.</div>
+              ) : (
+                <ul className="event-list">
+                  {alertHistory.map((item) => (
+                    <li key={String(item.id)} className="event-item">
+                      <span className="label">{String(item.severity ?? 'info')}</span>
+                      <p>{String(item.message ?? '')}</p>
+                      <p className="inline-note">{formatTimestamp(String(item.created_at ?? ''))}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </article>
+        </section>
+      )}
     </section>
   )
 }

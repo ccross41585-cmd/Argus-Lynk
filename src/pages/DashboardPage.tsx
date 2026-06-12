@@ -73,12 +73,38 @@ function getKeyMetric(device: DashboardDevice): string {
     case 'well_pump': return m.alert_state && m.alert_state !== 'Normal'
                         ? String(m.alert_state)
                         : `Runtime ${String(m.runtime ?? 'â€”')}`
-    case 'freezer':   return String(m.temperature ?? 'â€”')
+    case 'freezer': {
+      const temp = String(m.temperature ?? '—')
+      const warn = String(m.warning_high_f ?? 5)
+      const alarm = String(m.alarm_high_f ?? 10)
+      const batt = m.battery_percent === null || m.battery_percent === undefined
+        ? 'n/a'
+        : `${String(m.battery_percent)}%`
+      return `${temp} · Warn>${warn}°F · Alarm>${alarm}°F · Batt ${batt}`
+    }
     case 'weather':   return `${String(m.temperature ?? 'â€”')}${m.summary ? ' Â· ' + String(m.summary) : ''}`
     case 'driveway':  return String(m.status ?? 'â€”')
     case 'gateway':   return `${String(m.nodes_online ?? 0)} nodes online`
     default:          return 'â€”'
   }
+}
+
+function sparklinePath(points: number[], width = 120, height = 28): string {
+  if (points.length === 0) return ''
+  if (points.length === 1) return `M 0 ${height / 2} L ${width} ${height / 2}`
+
+  const min = Math.min(...points)
+  const max = Math.max(...points)
+  const span = Math.max(max - min, 0.0001)
+  const step = width / (points.length - 1)
+
+  return points
+    .map((p, i) => {
+      const x = i * step
+      const y = height - ((p - min) / span) * (height - 2) - 1
+      return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+    })
+    .join(' ')
 }
 
 const DEVICE_ICONS: Record<string, React.ElementType> = {
@@ -364,7 +390,11 @@ export function DashboardPage() {
         label: 'Freezer',
         status: overview.freezer.temperature,
         detail: overview.freezer.state,
-        tone: 'info' as const,
+        tone: overview.freezer.state === 'Critical'
+          ? ('danger' as const)
+          : overview.freezer.state === 'Warning'
+            ? ('warning' as const)
+            : ('success' as const),
       } : null,
       hasDriveway || !isSupabaseConfigured ? {
         icon: 'driveway' as StatusCardIcon,
@@ -615,6 +645,13 @@ export function DashboardPage() {
                   <p className="device-tile__location">{device.location}</p>
                 )}
                 <p className="device-tile__metric">{getKeyMetric(device)}</p>
+                {device.type === 'freezer' && Array.isArray(device.metadata.trend_points) && device.metadata.trend_points.length > 1 && (
+                  <div className="device-tile__sparkline" aria-hidden="true">
+                    <svg viewBox="0 0 120 28" preserveAspectRatio="none">
+                      <path d={sparklinePath(device.metadata.trend_points as number[])} />
+                    </svg>
+                  </div>
+                )}
               </button>
             )
           })}

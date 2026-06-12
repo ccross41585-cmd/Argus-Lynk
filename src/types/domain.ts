@@ -1,6 +1,7 @@
 export const DEVICE_TYPES = [
   'fence_controller',
   'freezer_alarm',
+  'freezer_lynk',
   'driveway_alarm',
   'pump_controller',
 ] as const
@@ -9,13 +10,21 @@ export type DeviceType = (typeof DEVICE_TYPES)[number] | (string & {})
 
 export interface Device {
   id: string
+  tenant_id?: string | null
   name: string
   type: DeviceType
+  device_type?: DeviceType | null
+  device_key?: string | null
+  status?: 'online' | 'offline' | 'alarm' | 'low_battery' | string | null
+  location?: string | null
   gateway_id: string | null
   desired_state: string | null
   confirmed_state: string | null
   online: boolean
   last_seen: string | null
+  last_seen_at?: string | null
+  firmware_version?: string | null
+  created_at?: string
   rssi: number | string | null
   battery_voltage: number | string | null
   updated_at: string

@@ -29,6 +29,7 @@ function toDashboardType(dbType: string): DashboardDevice['type'] {
     fence_controller: 'fence',
     pump_controller:  'well_pump',
     freezer_alarm:    'freezer',
+    freezer_lynk:     'freezer',
     driveway_alarm:   'driveway',
     gateway:          'gateway',
   }
@@ -59,11 +60,40 @@ function isContactorFault(fb: string): fb is ContactorFault {
 }
 
 function deviceStatus(row: Device): DashboardDevice['status'] {
+  const dbStatus = String(row.status ?? '').toLowerCase()
+  if (dbStatus === 'alarm') return 'critical'
+  if (dbStatus === 'low_battery') return 'warning'
+  if (dbStatus === 'offline') return 'offline'
+  if (dbStatus === 'online') return 'online'
   return row.online ? 'online' : 'offline'
 }
 
-function fenceMeta(row: Device): Record<string, string | number | boolean | null> {
-  const base = (row.metadata ?? {}) as Record<string, string | number | boolean | null>
+function asFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+function freezerTemperatureLabel(meta: Record<string, unknown>): string {
+  const existing = meta.temperature
+  if (typeof existing === 'string' && existing.trim().length > 0 && existing !== '—') {
+    return existing
+  }
+
+  const tempF = asFiniteNumber(meta.temperature_f)
+  if (tempF !== null) return `${tempF.toFixed(1)}°F`
+
+  const tempC = asFiniteNumber(meta.temperature_c)
+  if (tempC !== null) return `${((tempC * 9) / 5 + 32).toFixed(1)}°F`
+
+  return '—'
+}
+
+function fenceMeta(row: Device): Record<string, string | number | boolean | null | number[]> {
+  const base = (row.metadata ?? {}) as Record<string, string | number | boolean | null | number[]>
   const desired    = (row.desired_state    ?? '').toUpperCase()  // '' | 'ON' | 'OFF'
   const confirmed  = (row.confirmed_state  ?? '').toUpperCase()  // '' | 'ON' | 'OFF'
 
@@ -93,10 +123,111 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
   }
 }
 
+type FreezerReadingRow = {
+  device_id: string
+  temperature_f: number
+  battery_percent: number | null
+  battery_voltage: number | null
+  created_at: string
+}
+
+type FreezerSettingRow = {
+  device_id: string
+  temp_warning_high_f: number
+  temp_alarm_high_f: number
+}
+
+function freezerStatusLabel(deviceStatusValue: DashboardDevice['status'], freezerState?: string | null): 'Normal' | 'Warning' | 'Critical' {
+  if (deviceStatusValue === 'critical' || freezerState === 'alarm') return 'Critical'
+  if (deviceStatusValue === 'warning' || freezerState === 'warning') return 'Warning'
+  return 'Normal'
+}
+
+async function withFreezerMetadata(rows: Device[]): Promise<Device[]> {
+  if (!supabase) return rows
+
+  const freezerIds = rows
+    .filter((row) => {
+      const dbType = (row.device_type ?? row.type ?? '').toLowerCase()
+      return dbType === 'freezer_lynk' || dbType === 'freezer_alarm'
+    })
+    .map((row) => row.id)
+
+  if (freezerIds.length === 0) return rows
+
+  const [readingsRes, settingsRes] = await Promise.all([
+    supabase
+      .from('freezer_temperature_logs')
+      .select('device_id, temperature_f, battery_percent, battery_voltage, created_at')
+      .in('device_id', freezerIds)
+      .order('created_at', { ascending: false })
+      .limit(Math.max(24 * freezerIds.length, 24)),
+    supabase
+      .from('freezer_lynk_settings')
+      .select('device_id, temp_warning_high_f, temp_alarm_high_f')
+      .in('device_id', freezerIds),
+  ])
+
+  const latestByDevice = new Map<string, FreezerReadingRow>()
+  const trendByDevice = new Map<string, number[]>()
+
+  if (readingsRes.data) {
+    for (const raw of readingsRes.data as unknown as FreezerReadingRow[]) {
+      if (!latestByDevice.has(raw.device_id)) latestByDevice.set(raw.device_id, raw)
+      const arr = trendByDevice.get(raw.device_id) ?? []
+      if (arr.length < 16) arr.push(Number(raw.temperature_f))
+      trendByDevice.set(raw.device_id, arr)
+    }
+  }
+
+  const settingsByDevice = new Map<string, FreezerSettingRow>()
+  if (settingsRes.data) {
+    for (const raw of settingsRes.data as unknown as FreezerSettingRow[]) {
+      settingsByDevice.set(raw.device_id, raw)
+    }
+  }
+
+  return rows.map((row) => {
+    if (!freezerIds.includes(row.id)) return row
+
+    const latest = latestByDevice.get(row.id)
+    const settings = settingsByDevice.get(row.id)
+    const meta = (row.metadata ?? {}) as Record<string, unknown>
+    const state = String(meta.freezer_state ?? '').toLowerCase() || null
+    const status = deviceStatus(row)
+    const statusLabel = freezerStatusLabel(status, state)
+
+    return {
+      ...row,
+      metadata: {
+        ...meta,
+        temperature: latest ? `${Number(latest.temperature_f).toFixed(1)}°F` : freezerTemperatureLabel(meta),
+        temperature_f: latest?.temperature_f ?? (meta.temperature_f as number | undefined) ?? null,
+        battery_percent: latest?.battery_percent ?? (meta.battery_percent as number | undefined) ?? null,
+        battery_voltage: latest?.battery_voltage ?? (meta.battery_voltage as number | undefined) ?? null,
+        warning_high_f: settings?.temp_warning_high_f ?? (meta.warning_high_f as number | undefined) ?? 5,
+        alarm_high_f: settings?.temp_alarm_high_f ?? (meta.alarm_high_f as number | undefined) ?? 10,
+        safe_range: `Below ${(settings?.temp_warning_high_f ?? 5).toFixed(0)}°F`,
+        updated: latest?.created_at ?? (meta.updated as string | undefined) ?? row.last_seen,
+        freezer_state: state ?? (statusLabel === 'Critical' ? 'alarm' : statusLabel === 'Warning' ? 'warning' : 'ok'),
+        trend_points: (trendByDevice.get(row.id) ?? []).slice().reverse(),
+      },
+    }
+  })
+}
+
 export function mapDevice(row: Device): DashboardDevice {
-  const type = toDashboardType(row.type)
-  const meta = type === 'fence' ? fenceMeta(row)
-    : ((row.metadata ?? {}) as Record<string, string | number | boolean | null>)
+  const type = toDashboardType(String(row.device_type ?? row.type ?? ''))
+  const baseMeta = type === 'fence' ? fenceMeta(row)
+    : ((row.metadata ?? {}) as Record<string, string | number | boolean | null | number[]>)
+
+  const meta = (() => {
+    if (type !== 'freezer') return baseMeta
+    const freezerMeta = { ...baseMeta } as Record<string, string | number | boolean | null | number[]>
+    const normalized = freezerTemperatureLabel(freezerMeta as Record<string, unknown>)
+    freezerMeta.temperature = normalized
+    return freezerMeta
+  })()
 
   // A fence device can be online (comms OK) but electrically faulted.
   let status = deviceStatus(row)
@@ -108,14 +239,15 @@ export function mapDevice(row: Device): DashboardDevice {
 
   return {
     id:         row.id,
-    tenant_id:  '',
+    tenant_id:  row.tenant_id ?? '',
     name:       row.name,
     type,
+    location:   row.location ?? undefined,
     enabled:    true,
     sort_order: 0,
     pinned:     type === 'fence',
     status,
-    last_seen:  row.last_seen ?? new Date().toISOString(),
+    last_seen:  row.last_seen_at ?? row.last_seen ?? new Date().toISOString(),
     metadata:   meta,
   }
 }
@@ -124,6 +256,7 @@ export function mapDevice(row: Device): DashboardDevice {
 
 export function buildOverview(devices: DashboardDevice[]): DashboardOverview {
   const fence = devices.find((d) => d.type === 'fence')
+  const freezer = devices.find((d) => d.type === 'freezer')
   const anyOnline = devices.some((d) => d.status !== 'offline')
   const now = new Date().toISOString()
 
@@ -183,11 +316,19 @@ export function buildOverview(devices: DashboardDevice[]): DashboardOverview {
       thresholdMinutes: 60,
     },
     freezer: {
-      temperature:     '—',
-      state:           'Normal',
-      safeRange:       '—',
-      node:            'Offline',
-      lastUpdatedLabel: '—',
+      temperature:      freezer ? freezerTemperatureLabel(freezer.metadata as Record<string, unknown>) : '—',
+      state:            String((freezer?.metadata.freezer_state ?? '')).toLowerCase() === 'alarm'
+        ? 'Critical'
+        : String((freezer?.metadata.freezer_state ?? '')).toLowerCase() === 'warning'
+          ? 'Warning'
+          : freezer?.status === 'critical'
+            ? 'Critical'
+            : freezer?.status === 'warning'
+              ? 'Warning'
+              : 'Normal',
+      safeRange:        `Warn > ${String(freezer?.metadata.warning_high_f ?? 5)}°F · Alarm > ${String(freezer?.metadata.alarm_high_f ?? 10)}°F`,
+      node:             freezer && freezer.status !== 'offline' ? 'Online' : 'Offline',
+      lastUpdatedLabel: String(freezer?.metadata.updated ?? '—'),
     },
     drivewayAlarm: {
       status:       'Node Offline',
@@ -285,7 +426,8 @@ export async function getLiveDevices(): Promise<DashboardDevice[]> {
     console.error('getLiveDevices:', error?.message)
     return []
   }
-  return (data as Device[]).map(mapDevice)
+  const enriched = await withFreezerMetadata(data as Device[])
+  return enriched.map(mapDevice)
 }
 
 export async function getLiveAlerts(): Promise<AlertRecord[]> {
