@@ -21,15 +21,20 @@ const int RELAY_PIN          = 26;
 const int RELAY_ACTIVE_LEVEL = RELAY_ACTIVE_LOW ? LOW  : HIGH;
 const int RELAY_IDLE_LEVEL   = RELAY_ACTIVE_LOW ? HIGH : LOW;
 
-// Auxiliary contactor feedback (dry contact: closed = LOW via INPUT_PULLUP).
-// GPIO34 is input-only on the Heltec V3 — INPUT_PULLUP is wired externally.
-// Aux 13 → GPIO34, Aux 14 → GND. Closed = LOW, Open = HIGH.
+// Auxiliary contactor feedback: 3.3 V → aux contact → GPIO 34 (input-only, no pull).
+// Closed (contactor ON)  → GPIO 34 reads HIGH (~3.27 V).
+// Open   (contactor OFF) → GPIO 34 reads LOW  (floating low via external path).
 #define CONTACTOR_FEEDBACK_PIN 34
 
 // Heartbeat interval (ms). Field node broadcasts state every HB_INTERVAL_MS.
 const unsigned long HB_INTERVAL_MS = 30000;
 unsigned long lastHeartbeatAt = 0;
 bool immediateHeartbeatNeeded = false;  // Set true to fire HB ASAP (e.g. power-loss detected).
+
+// Contactor feedback timing and failure tracking.
+const unsigned long CONTACTOR_GRACE_MS = 1000; // Grace period after relay command before declaring failure.
+unsigned long lastCommandChangeMs = 0;          // millis() timestamp of last relay state change.
+bool contactFailed = false;                     // Latches true on mismatch; cleared when aux matches command.
 
 // Auto-rearm removed: only gateway commands change relay state.
 
@@ -60,51 +65,72 @@ float  lastSNR  = 0.0;
 // ── Contactor feedback ────────────────────────────────────────────────────────
 
 // Debounced read: 5 samples over 100 ms, majority vote.
-// Returns true when the aux contact is closed (LOW = circuit complete).
+// Returns true when the aux contact is CLOSED (HIGH = 3.3 V via contact → GPIO 34).
 bool readAuxDebounced() {
-  int lowCount = 0;
+  int highCount = 0;
   for (int i = 0; i < 5; i++) {
-    if (digitalRead(CONTACTOR_FEEDBACK_PIN) == LOW) lowCount++;
+    if (digitalRead(CONTACTOR_FEEDBACK_PIN) == HIGH) highCount++;
     delay(20);
   }
-  return lowCount >= 3;
+  return highCount >= 3;
 }
 
 // Raw aux label included in ACK / HB packets so the gateway can forward it.
+// HIGH = contact closed (contactor ON); LOW = contact open (contactor OFF).
 String auxRawLabel() {
-  return readAuxDebounced() ? "AUX_LOW" : "AUX_HIGH";
+  return readAuxDebounced() ? "AUX_HIGH" : "AUX_LOW";
 }
 
 bool contactorIsEngaged() {
-  return readAuxDebounced();
+  return readAuxDebounced();  // true = HIGH = contact closed = contactor ON.
 }
 
 // Returns the relationship between the commanded state and the physical contactor.
+// Includes a CONTACTOR_GRACE_MS window after a relay command before declaring failure.
 // Uses STUCK_ON (underscore) for clean pipe-delimited packet parsing.
 String contactorFeedback() {
-  bool engaged = contactorIsEngaged();
-  if ( commandedOn &&  engaged) return "CONFIRMED";
-  if ( commandedOn && !engaged) return "FAILED";
-  if (!commandedOn && !engaged) return "OPEN";
-  /* !commandedOn && engaged */  return "STUCK_ON";
+  bool auxHigh = readAuxDebounced();
+  unsigned long msSinceCommand = millis() - lastCommandChangeMs;
+
+  // Still within grace window — don't declare failure yet.
+  if (msSinceCommand < CONTACTOR_GRACE_MS) {
+    return "CHECKING";
+  }
+
+  if ( commandedOn &&  auxHigh) { contactFailed = false; return "CONFIRMED"; }
+  if ( commandedOn && !auxHigh) { contactFailed = true;  return "FAILED";    }
+  if (!commandedOn && !auxHigh) { contactFailed = false; return "OPEN";      }
+  // !commandedOn && auxHigh
+  contactFailed = true;
+  return "STUCK_ON";
 }
 
-// Emits a Serial message whenever the feedback state or raw aux level transitions.
+// Emits a Serial message whenever the feedback state transitions.
+// Also sets immediateHeartbeatNeeded if a FAILED condition is detected.
 void checkFeedbackChange() {
-  String fb  = contactorFeedback();
-  String raw = auxRawLabel();
+  bool   auxHigh        = readAuxDebounced();
+  String raw            = auxHigh ? "AUX_HIGH" : "AUX_LOW";
+  int    rawPin         = digitalRead(CONTACTOR_FEEDBACK_PIN);
+  String fb             = contactorFeedback();
+  unsigned long msSince = millis() - lastCommandChangeMs;
+
   if (fb != lastFeedbackText) {
     lastFeedbackText = fb;
-    Serial.print("AUX_RAW=");
-    Serial.println(raw);
-    Serial.print("Contactor feedback: ");
-    Serial.println(fb);
-    // If the fence was commanded ON but the contactor just disengaged, the
-    // power supply may have failed.  Flag an immediate heartbeat so the
-    // gateway learns about the failure within one loop tick instead of
-    // waiting up to 30 s for the normal scheduled heartbeat.
+    Serial.print("[AUX] Cmd=");
+    Serial.print(commandedOn ? "ON" : "OFF");
+    Serial.print(" GPIO34=");
+    Serial.print(rawPin == HIGH ? "HIGH" : "LOW");
+    Serial.print(" AuxLabel=");
+    Serial.print(raw);
+    Serial.print(" Status=");
+    Serial.print(fb);
+    Serial.print(" msSinceCmd=");
+    Serial.println(msSince);
+
+    // If the fence was commanded ON but the contactor just disengaged (outside
+    // the grace window), flag an immediate heartbeat so the gateway learns quickly.
     if (fb == "FAILED" && commandedOn) {
-      Serial.println("Power loss detected while commanded ON — flagging immediate HB.");
+      Serial.println("[AUX] Power loss detected while commanded ON — flagging immediate HB.");
       immediateHeartbeatNeeded = true;
     }
   }
@@ -216,22 +242,34 @@ String packetPart(const String& packet, int partIndex) {
 
 void applyRelayState(bool nextCommandedOn) {
   commandedOn = nextCommandedOn;
+  lastCommandChangeMs = millis();  // Start grace period timer.
+  contactFailed = false;           // Clear any previous failure flag on new command.
+
   digitalWrite(RELAY_PIN, commandedOn ? RELAY_ACTIVE_LEVEL : RELAY_IDLE_LEVEL);
+
+  Serial.print("[RELAY] Cmd=");
+  Serial.print(commandedOn ? "ON" : "OFF");
+  Serial.print(" GPIO34_immed=");
+  Serial.println(digitalRead(CONTACTOR_FEEDBACK_PIN) == HIGH ? "HIGH" : "LOW");
 
   if (readRelayOutputState() != commandedOn) {
     lastErrorText = "RELAY MISMATCH";
-    Serial.println("Relay output verification failed after write.");
+    Serial.println("[RELAY] Output verification failed after write.");
   } else {
     lastErrorText = "";
   }
 
-  // Log raw aux immediately after state change and again after brief settle time.
-  Serial.print("AUX_RAW=");
-  Serial.println(auxRawLabel());
-  delay(200);  // Allow contactor to physically engage/disengage.
-  Serial.print("AUX_RAW_POST_SETTLE=");
-  Serial.println(auxRawLabel());
+  // Log raw aux 200 ms after energising; full status evaluated after grace period in loop.
+  delay(200);
+  Serial.print("[AUX] 200ms post-cmd GPIO34=");
+  Serial.print(digitalRead(CONTACTOR_FEEDBACK_PIN) == HIGH ? "HIGH" : "LOW");
+  Serial.print(" AuxLabel=");
+  Serial.print(auxRawLabel());
+  Serial.print(" msSinceCmd=");
+  Serial.println(millis() - lastCommandChangeMs);
 
+  // Reset lastFeedbackText so checkFeedbackChange() emits the CHECKING transition.
+  lastFeedbackText = "";
   checkFeedbackChange();
   drawScreen();
 }
@@ -430,9 +468,8 @@ void setup() {
   setupOLED();
   setupRelay();
 
-  // GPIO34 is input-only; use INPUT_PULLUP (the internal pull is weak on this pin
-  // but still helps if the external pull-down wire is removed).
-  pinMode(CONTACTOR_FEEDBACK_PIN, INPUT_PULLUP);
+  // GPIO34 is input-only; no internal pull — 3.3 V is sourced externally through the aux contact.
+  pinMode(CONTACTOR_FEEDBACK_PIN, INPUT);
 
   // Boot self-test: read aux raw before relay activates.
   int rawBoot = digitalRead(CONTACTOR_FEEDBACK_PIN);
