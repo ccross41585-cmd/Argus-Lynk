@@ -42,27 +42,6 @@ type FreezerSettings = {
   enabled: boolean
 }
 
-const DEVICE_SELECT_COLUMNS = [
-  'id',
-  'tenant_id',
-  'name',
-  'type',
-  'device_type',
-  'status',
-  'online',
-  'confirmed_state',
-  'desired_state',
-  'last_seen',
-  'last_seen_at',
-  'last_heartbeat',
-  'updated_at',
-  'location',
-  'gateway_id',
-  'battery_voltage',
-  'rssi',
-  'metadata',
-].join(', ')
-
 const DEVICE_SELECT_COLUMNS_FALLBACK = [
   'id',
   'tenant_id',
@@ -82,6 +61,15 @@ const DEVICE_SELECT_COLUMNS_FALLBACK = [
   'rssi',
   'metadata',
 ].join(', ')
+
+function getMissingDevicesColumn(message: string | undefined): string | null {
+  const text = String(message ?? '')
+  const direct = text.match(/column\s+devices\.([a-zA-Z0-9_]+)\s+does not exist/i)
+  if (direct?.[1]) return direct[1]
+  const schemaCache = text.match(/'([a-zA-Z0-9_]+)'\s+column\s+of\s+'devices'/i)
+  if (schemaCache?.[1]) return schemaCache[1]
+  return null
+}
 
 function isFreezerType(type: string | null | undefined) {
   const normalized = String(type ?? '').toLowerCase()
@@ -347,11 +335,57 @@ export function DeviceDetailPage() {
 
     let isActive = true
 
+    async function loadDeviceWithFallback(id: string) {
+      const baseColumns = [
+        'id',
+        'tenant_id',
+        'name',
+        'type',
+        'device_type',
+        'status',
+        'online',
+        'confirmed_state',
+        'desired_state',
+        'last_seen',
+        'last_seen_at',
+        'last_heartbeat',
+        'updated_at',
+        'location',
+        'gateway_id',
+        'battery_voltage',
+        'rssi',
+        'metadata',
+      ]
+
+      const selected = new Set(baseColumns)
+
+      for (let attempt = 0; attempt < baseColumns.length; attempt++) {
+        const selectColumns = Array.from(selected).join(', ')
+        const response = await client
+          .from('devices')
+          .select(selectColumns)
+          .eq('id', id)
+          .single()
+
+        if (!response.error) return response
+
+        const missingColumn = getMissingDevicesColumn(response.error.message)
+        if (!missingColumn || !selected.has(missingColumn)) return response
+        selected.delete(missingColumn)
+      }
+
+      return client
+        .from('devices')
+        .select(DEVICE_SELECT_COLUMNS_FALLBACK)
+        .eq('id', id)
+        .single()
+    }
+
     async function loadDeviceState() {
       setActionError(null)
 
       let [deviceResponse, commandResponse, eventResponse, alertsResponse] = await Promise.all([
-        client.from('devices').select(DEVICE_SELECT_COLUMNS).eq('id', deviceId).single(),
+        loadDeviceWithFallback(deviceId),
         client
           .from('device_commands')
           .select('*')
@@ -372,15 +406,6 @@ export function DeviceDetailPage() {
           .order('created_at', { ascending: false })
           .limit(20),
       ])
-
-      if (deviceResponse.error?.message?.toLowerCase().includes('last_heartbeat')) {
-        const fallbackDeviceResponse = await client
-          .from('devices')
-          .select(DEVICE_SELECT_COLUMNS_FALLBACK)
-          .eq('id', deviceId)
-          .single()
-        deviceResponse = fallbackDeviceResponse
-      }
 
       if (!isActive) {
         return

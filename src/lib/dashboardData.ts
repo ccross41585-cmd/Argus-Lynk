@@ -23,27 +23,6 @@ import type {
 } from '../types/dashboard'
 import type { Device } from '../types/domain'
 
-const DEVICE_SELECT_COLUMNS = [
-  'id',
-  'tenant_id',
-  'name',
-  'type',
-  'device_type',
-  'status',
-  'online',
-  'confirmed_state',
-  'desired_state',
-  'last_seen',
-  'last_seen_at',
-  'last_heartbeat',
-  'updated_at',
-  'location',
-  'gateway_id',
-  'battery_voltage',
-  'rssi',
-  'metadata',
-].join(', ')
-
 const DEVICE_SELECT_COLUMNS_FALLBACK = [
   'id',
   'tenant_id',
@@ -63,6 +42,68 @@ const DEVICE_SELECT_COLUMNS_FALLBACK = [
   'rssi',
   'metadata',
 ].join(', ')
+
+function getMissingDevicesColumn(message: string | undefined): string | null {
+  const text = String(message ?? '')
+  const direct = text.match(/column\s+devices\.([a-zA-Z0-9_]+)\s+does not exist/i)
+  if (direct?.[1]) return direct[1]
+  const schemaCache = text.match(/'([a-zA-Z0-9_]+)'\s+column\s+of\s+'devices'/i)
+  if (schemaCache?.[1]) return schemaCache[1]
+  return null
+}
+
+async function selectDevicesResilient(): Promise<{ data: Device[] | null; error: string | null }> {
+  if (!supabase) return { data: [], error: null }
+
+  const baseColumns = [
+    'id',
+    'tenant_id',
+    'name',
+    'type',
+    'device_type',
+    'status',
+    'online',
+    'confirmed_state',
+    'desired_state',
+    'last_seen',
+    'last_seen_at',
+    'last_heartbeat',
+    'updated_at',
+    'location',
+    'gateway_id',
+    'battery_voltage',
+    'rssi',
+    'metadata',
+  ]
+
+  const selected = new Set(baseColumns)
+
+  for (let attempt = 0; attempt < baseColumns.length; attempt++) {
+    const selectColumns = Array.from(selected).join(', ')
+    const { data, error } = await supabase
+      .from('devices')
+      .select(selectColumns)
+      .order('name')
+
+    if (!error) return { data: (data ?? null) as unknown as Device[] | null, error: null }
+
+    const missingColumn = getMissingDevicesColumn(error.message)
+    if (!missingColumn || !selected.has(missingColumn)) {
+      return { data: null, error: error.message }
+    }
+
+    selected.delete(missingColumn)
+  }
+
+  // Final conservative fallback.
+  const { data, error } = await supabase
+    .from('devices')
+    .select(DEVICE_SELECT_COLUMNS_FALLBACK)
+    .order('name')
+
+  if (error) return { data: null, error: error.message }
+  return { data: (data ?? null) as unknown as Device[] | null, error: null }
+}
 
 // ── Type mapping ──────────────────────────────────────────────────────────────
 
@@ -468,22 +509,10 @@ export function generateContactorAlerts(
 
 export async function getLiveDevices(): Promise<DashboardDevice[]> {
   if (!supabase) return []
-  let { data, error } = await supabase
-    .from('devices')
-    .select(DEVICE_SELECT_COLUMNS)
-    .order('name')
-
-  if (error?.message?.toLowerCase().includes('last_heartbeat')) {
-    const fallbackRes = await supabase
-      .from('devices')
-      .select(DEVICE_SELECT_COLUMNS_FALLBACK)
-      .order('name')
-    data = fallbackRes.data
-    error = fallbackRes.error
-  }
+  const { data, error } = await selectDevicesResilient()
 
   if (error || !data) {
-    console.error('getLiveDevices:', error?.message)
+    console.error('getLiveDevices:', error)
     return []
   }
   const enriched = await withFreezerMetadata(data as unknown as Device[])
