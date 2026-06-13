@@ -486,7 +486,7 @@ export async function getLiveDevices(): Promise<DashboardDevice[]> {
     console.error('getLiveDevices:', error?.message)
     return []
   }
-  const enriched = await withFreezerMetadata(data as Device[])
+  const enriched = await withFreezerMetadata(data as unknown as Device[])
   return enriched.map(mapDevice)
 }
 

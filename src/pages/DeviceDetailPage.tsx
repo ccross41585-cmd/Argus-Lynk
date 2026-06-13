@@ -400,7 +400,7 @@ export function DeviceDetailPage() {
         setActionError(eventResponse.error.message)
       }
 
-      const loadedDevice = deviceResponse.data as Device
+      const loadedDevice = deviceResponse.data as unknown as Device
       setDevice(loadedDevice)
       setLatestCommand((commandResponse.data ?? null) as DeviceCommand | null)
       setEvents((eventResponse.data ?? []) as DeviceEvent[])
