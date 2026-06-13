@@ -332,6 +332,7 @@ export function DeviceDetailPage() {
     }
 
     const client = supabase
+    const routeDeviceId = deviceId
 
     let isActive = true
 
@@ -385,7 +386,7 @@ export function DeviceDetailPage() {
       setActionError(null)
 
       let [deviceResponse, commandResponse, eventResponse, alertsResponse] = await Promise.all([
-        loadDeviceWithFallback(deviceId),
+        loadDeviceWithFallback(routeDeviceId),
         client
           .from('device_commands')
           .select('*')
