@@ -13,6 +13,7 @@ import {
   humanizeToken,
   isPendingStatus,
 } from '../lib/display'
+import { getDeviceOnlineStatus } from '../lib/deviceOnlineStatus'
 import {
   acknowledgeAlert,
   createCommand,
@@ -40,6 +41,47 @@ type FreezerSettings = {
   logging_interval_minutes: number
   enabled: boolean
 }
+
+const DEVICE_SELECT_COLUMNS = [
+  'id',
+  'tenant_id',
+  'name',
+  'type',
+  'device_type',
+  'status',
+  'online',
+  'confirmed_state',
+  'desired_state',
+  'last_seen',
+  'last_seen_at',
+  'last_heartbeat',
+  'updated_at',
+  'location',
+  'gateway_id',
+  'battery_voltage',
+  'rssi',
+  'metadata',
+].join(', ')
+
+const DEVICE_SELECT_COLUMNS_FALLBACK = [
+  'id',
+  'tenant_id',
+  'name',
+  'type',
+  'device_type',
+  'status',
+  'online',
+  'confirmed_state',
+  'desired_state',
+  'last_seen',
+  'last_seen_at',
+  'updated_at',
+  'location',
+  'gateway_id',
+  'battery_voltage',
+  'rssi',
+  'metadata',
+].join(', ')
 
 function isFreezerType(type: string | null | undefined) {
   const normalized = String(type ?? '').toLowerCase()
@@ -308,8 +350,8 @@ export function DeviceDetailPage() {
     async function loadDeviceState() {
       setActionError(null)
 
-      const [deviceResponse, commandResponse, eventResponse, alertsResponse] = await Promise.all([
-        client.from('devices').select('*').eq('id', deviceId).single(),
+      let [deviceResponse, commandResponse, eventResponse, alertsResponse] = await Promise.all([
+        client.from('devices').select(DEVICE_SELECT_COLUMNS).eq('id', deviceId).single(),
         client
           .from('device_commands')
           .select('*')
@@ -330,6 +372,15 @@ export function DeviceDetailPage() {
           .order('created_at', { ascending: false })
           .limit(20),
       ])
+
+      if (deviceResponse.error?.message?.toLowerCase().includes('last_heartbeat')) {
+        const fallbackDeviceResponse = await client
+          .from('devices')
+          .select(DEVICE_SELECT_COLUMNS_FALLBACK)
+          .eq('id', deviceId)
+          .single()
+        deviceResponse = fallbackDeviceResponse
+      }
 
       if (!isActive) {
         return
@@ -544,11 +595,28 @@ export function DeviceDetailPage() {
   }
 
   const isFreezerDevice = useMemo(() => isFreezerType(device?.type), [device?.type])
+  const onlineStatus = useMemo(
+    () => (device ? getDeviceOnlineStatus(device) : null),
+    [device],
+  )
   const freezerCurrentTemp = freezerHistory24h.length > 0
     ? freezerHistory24h[freezerHistory24h.length - 1].temperature_f
     : null
   const freezer24hPath = linePath(freezerHistory24h.map((p) => p.temperature_f))
   const freezer7dPath = linePath(freezerHistory7d.map((p) => p.temperature_f))
+
+  useEffect(() => {
+    if (!device) return
+    const type = String(device.device_type ?? device.type ?? '').toLowerCase()
+    if (!type.includes('fence')) return
+    console.log('[ONLINE STATUS]', device.name, {
+      onlineField: device.online,
+      last_seen: device.last_seen,
+      last_heartbeat: device.last_heartbeat,
+      updated_at: device.updated_at,
+      computed: getDeviceOnlineStatus(device),
+    })
+  }, [device])
 
   if (!isSupabaseConfigured) {
     return <LocalDeviceDetail deviceId={deviceId ?? ''} />
@@ -626,8 +694,8 @@ export function DeviceDetailPage() {
               <p className="label">{humanizeToken(device.type)}</p>
               <h2>Current Device Snapshot</h2>
             </div>
-            <StatusPill tone={device.online ? 'success' : 'danger'}>
-              {device.online ? 'Online' : 'Offline'}
+            <StatusPill tone={onlineStatus?.online ? 'success' : 'danger'}>
+              {onlineStatus?.label ?? 'OFFLINE'}
             </StatusPill>
           </div>
 
@@ -637,12 +705,16 @@ export function DeviceDetailPage() {
               <strong>{humanizeToken(device.confirmed_state)}</strong>
             </div>
             <div className="key-value-item">
+              <span className="label">Connection</span>
+              <strong>{onlineStatus?.label ?? 'OFFLINE'}</strong>
+            </div>
+            <div className="key-value-item">
               <span className="label">Desired State</span>
               <strong>{humanizeToken(device.desired_state)}</strong>
             </div>
             <div className="key-value-item">
               <span className="label">Last Seen</span>
-              <strong>{formatTimestamp(device.last_seen)}</strong>
+              <strong>{formatTimestamp(device.last_seen ?? device.last_heartbeat ?? device.updated_at)}</strong>
             </div>
             <div className="key-value-item">
               <span className="label">Battery</span>

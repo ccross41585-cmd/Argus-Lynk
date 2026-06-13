@@ -42,6 +42,15 @@ interface TelemetryStateRow {
   alarm_active: boolean
 }
 
+interface PushDispatchOptions {
+  targetUserId?: string | null
+  url?: string
+  deviceId?: string
+  deviceType?: string
+  alertType?: string
+  temperatureF?: number
+}
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -52,6 +61,23 @@ function json(data: unknown, status = 200): Response {
       'Access-Control-Allow-Headers': 'Authorization, Content-Type',
     },
   })
+}
+
+function fail(stage: string, error: unknown, status = 500): Response {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'string'
+      ? error
+      : JSON.stringify(error)
+
+  console.error(
+    JSON.stringify({
+      stage,
+      error: message,
+    }),
+  )
+
+  return json({ error: message, stage }, status)
 }
 
 function toCelsius(f: number): number {
@@ -70,12 +96,103 @@ function deviceKind(device: DeviceRow): string {
   return (device.device_type ?? device.type ?? '').toLowerCase()
 }
 
+function metadataString(
+  metadata: Record<string, unknown> | null,
+  key: string,
+): string | null {
+  if (!metadata) return null
+  const value = metadata[key]
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed || null
+}
+
 let devicesTenantColumnSupported: boolean | null = null
+let devicesLocationColumnSupported: boolean | null = null
+
+function getMissingDevicesColumn(message: string | undefined): string | null {
+  const text = String(message ?? '')
+
+  const direct = text.match(/column\s+devices\.([a-zA-Z0-9_]+)\s+does not exist/i)
+  if (direct?.[1]) return direct[1]
+
+  const schemaCache = text.match(/'([a-zA-Z0-9_]+)'\s+column\s+of\s+'devices'/i)
+  if (schemaCache?.[1]) return schemaCache[1]
+
+  return null
+}
 
 function isMissingTenantColumnError(message: string | undefined): boolean {
-  const text = String(message ?? '').toLowerCase()
-  if (!text.includes('tenant_id')) return false
-  return text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find the')
+  return getMissingDevicesColumn(message) === 'tenant_id'
+}
+
+async function loadDeviceByKey(
+  supabase: ReturnType<typeof createClient>,
+  deviceKey: string,
+): Promise<{ device: DeviceRow | null; error: string | null }> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const selectColumns = ['id', 'name', 'type', 'device_type', 'status', 'metadata']
+    if (devicesTenantColumnSupported !== false) selectColumns.push('tenant_id')
+    if (devicesLocationColumnSupported !== false) selectColumns.push('location')
+
+    const { data, error } = await supabase
+      .from('devices')
+      .select(selectColumns.join(', '))
+      .eq('device_key', deviceKey)
+      .maybeSingle()
+
+    if (!error) {
+      if (selectColumns.includes('tenant_id')) devicesTenantColumnSupported = true
+      if (selectColumns.includes('location')) devicesLocationColumnSupported = true
+      return { device: (data as DeviceRow | null) ?? null, error: null }
+    }
+
+    const missingColumn = getMissingDevicesColumn(error.message)
+    if (!missingColumn) return { device: null, error: error.message }
+
+    if (missingColumn === 'tenant_id') {
+      devicesTenantColumnSupported = false
+      continue
+    }
+
+    if (missingColumn === 'location') {
+      devicesLocationColumnSupported = false
+      continue
+    }
+
+    return { device: null, error: error.message }
+  }
+
+  return { device: null, error: 'Unable to load device due to repeated missing column mismatches.' }
+}
+
+async function updateDeviceWithColumnFallback(
+  supabase: ReturnType<typeof createClient>,
+  deviceId: string,
+  payload: Record<string, unknown>,
+): Promise<string | null> {
+  const updatePayload: Record<string, unknown> = { ...payload }
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const { error } = await supabase
+      .from('devices')
+      .update(updatePayload)
+      .eq('id', deviceId)
+
+    if (!error) return null
+
+    const missingColumn = getMissingDevicesColumn(error.message)
+    if (!missingColumn || !(missingColumn in updatePayload)) {
+      return error.message
+    }
+
+    delete updatePayload[missingColumn]
+
+    if (missingColumn === 'tenant_id') devicesTenantColumnSupported = false
+    if (missingColumn === 'location') devicesLocationColumnSupported = false
+  }
+
+  return 'Unable to update device due to repeated missing column mismatches.'
 }
 
 async function assignDeviceOwnerIfNeeded(
@@ -107,17 +224,37 @@ async function assignDeviceOwnerIfNeeded(
   throw new Error(error.message)
 }
 
-async function bestEffortSendPushForAlert(alertId: string): Promise<void> {
+async function bestEffortSendPushForAlert(
+  alertId: string,
+  options: PushDispatchOptions = {},
+): Promise<void> {
   const endpoint = Deno.env.get('PUSH_NOTIFY_FUNCTION_URL')
   if (!endpoint) return
 
   try {
-    await fetch(endpoint, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ alertId }),
+      body: JSON.stringify({
+        alertId,
+        targetUserId: options.targetUserId ?? undefined,
+        url: options.url,
+        deviceId: options.deviceId,
+        deviceType: options.deviceType,
+        alertType: options.alertType,
+        temperatureF: options.temperatureF,
+      }),
     })
-  } catch {
+
+    if (!response.ok) {
+      const responseBody = await response.text().catch(() => '')
+      console.error('Push notification failed', response.status, responseBody.slice(0, 300))
+      return
+    }
+
+    console.log('Push notification sent')
+  } catch (pushErr) {
+    console.error('Push notification failed', (pushErr as Error).message)
     // Notification fanout is best-effort and should not fail telemetry ingestion.
   }
 }
@@ -135,7 +272,7 @@ serve(async (req: Request) => {
   try {
     payload = await req.json() as TelemetryPayload
   } catch {
-    return json({ error: 'Invalid JSON payload' }, 400)
+    return fail('parse_json', 'Invalid JSON payload', 400)
   }
 
   const deviceKey = payload.device_key?.trim()
@@ -150,13 +287,9 @@ serve(async (req: Request) => {
   const temperatureF = round3(hasF ? Number(payload.temperature_f) : toFahrenheit(Number(payload.temperature_c)))
   const temperatureC = round3(hasC ? Number(payload.temperature_c) : toCelsius(Number(payload.temperature_f)))
 
-  const { data: device, error: deviceErr } = await supabase
-    .from('devices')
-    .select('id, name, tenant_id, type, device_type, status, location, metadata')
-    .eq('device_key', deviceKey)
-    .maybeSingle()
+  const { device, error: deviceErr } = await loadDeviceByKey(supabase, deviceKey)
 
-  if (deviceErr) return json({ error: deviceErr.message }, 500)
+  if (deviceErr) return fail('load_device', deviceErr)
   if (!device) return json({ error: 'Unknown device_key' }, 401)
 
   const typedDevice = device as DeviceRow
@@ -168,6 +301,8 @@ serve(async (req: Request) => {
   const nowIso = new Date().toISOString()
   const configuredOwnerUserId = Deno.env.get('FREEZER_OWNER_USER_ID')?.trim() || null
   const configuredLocationLabel = Deno.env.get('FREEZER_OWNER_LOCATION_LABEL')?.trim() || null
+  const metadataOwnerUserId = metadataString(typedDevice.metadata, 'owner_user_id')
+  const metadataTenantId = metadataString(typedDevice.metadata, 'tenant_id')
 
   let ownerUserId = typedDevice.tenant_id ?? null
   try {
@@ -179,7 +314,7 @@ serve(async (req: Request) => {
       nowIso,
     )
   } catch (ownerErr) {
-    return json({ error: (ownerErr as Error).message }, 500)
+    return fail('assign_device_owner', ownerErr)
   }
 
   let { data: settings, error: settingsErr } = await supabase
@@ -188,7 +323,7 @@ serve(async (req: Request) => {
     .eq('device_id', typedDevice.id)
     .maybeSingle()
 
-  if (settingsErr) return json({ error: settingsErr.message }, 500)
+  if (settingsErr) return fail('load_settings', settingsErr.message)
 
   if (!settings) {
     const { data: insertedSettings, error: insertSettingsErr } = await supabase
@@ -197,7 +332,7 @@ serve(async (req: Request) => {
       .select('device_id, temp_alarm_high_f, temp_warning_high_f, alert_delay_minutes, heartbeat_minutes, offline_after_minutes, logging_interval_minutes, enabled')
       .single()
 
-    if (insertSettingsErr) return json({ error: insertSettingsErr.message }, 500)
+    if (insertSettingsErr) return fail('insert_default_settings', insertSettingsErr.message)
     settings = insertedSettings
   }
 
@@ -218,7 +353,7 @@ serve(async (req: Request) => {
       battery_percent: payload.battery_percent ?? null,
     })
 
-  if (insertLogErr) return json({ error: insertLogErr.message }, 500)
+  if (insertLogErr) return fail('insert_temperature_log', insertLogErr.message)
 
   const { data: currentState, error: stateErr } = await supabase
     .from('device_telemetry_state')
@@ -226,7 +361,7 @@ serve(async (req: Request) => {
     .eq('device_id', typedDevice.id)
     .maybeSingle()
 
-  if (stateErr) return json({ error: stateErr.message }, 500)
+  if (stateErr) return fail('load_telemetry_state', stateErr.message)
 
   const prevState = (currentState?.last_state ?? 'ok') as TelemetryStateRow['last_state']
 
@@ -257,42 +392,131 @@ serve(async (req: Request) => {
     alarmActive = false
   }
 
+  const ownerTargetUserId = metadataOwnerUserId ?? configuredOwnerUserId ?? null
+  const alertTenantId = typedDevice.tenant_id ?? metadataTenantId ?? null
+  const deviceDeepLink = `/devices/${typedDevice.id}`
+
+  const { data: existingActiveRows, error: existingActiveErr } = await supabase
+    .from('alerts')
+    .select('id, severity, title, status, resolved_at')
+    .eq('device_id', typedDevice.id)
+    .eq('status', 'active')
+    .is('resolved_at', null)
+    .in('severity', ['warning', 'critical'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+
+  if (existingActiveErr) return fail('load_existing_active_alert', existingActiveErr.message)
+
+  const existingActiveAlert = (existingActiveRows?.[0] ?? null) as {
+    id: string
+    severity: string
+    title: string
+    status: string
+    resolved_at: string | null
+  } | null
+
+  const shouldCreateWarning = nextState === 'warning' && prevState === 'ok'
   const shouldCreateAlarm = nextState === 'alarm' && prevState !== 'alarm'
   const shouldCreateRecovery = nextState === 'ok' && (prevState === 'warning' || prevState === 'alarm')
 
+  let createdWarningId: string | null = null
   let createdAlarmId: string | null = null
+  let createdRecoveryId: string | null = null
+
+  if (shouldCreateWarning) {
+    console.log('Freezer warning transition')
+
+    if (existingActiveAlert) {
+      console.log('Push notification skipped - duplicate/active alert exists')
+    } else {
+      const { data: warningRow, error: warningErr } = await supabase
+        .from('alerts')
+        .insert({
+          tenant_id: alertTenantId,
+          device_id: typedDevice.id,
+          severity: 'warning',
+          title: 'Freezer Lynk Warning',
+          message: `${typedDevice.name} is above warning temp: ${temperatureF.toFixed(1)}°F (warning ${freezerSettings.temp_warning_high_f.toFixed(1)}°F).`,
+          status: 'active',
+        })
+        .select('id')
+        .single()
+
+      if (warningErr) return fail('insert_warning_alert', warningErr.message)
+      createdWarningId = String(warningRow.id)
+      await bestEffortSendPushForAlert(createdWarningId, {
+        targetUserId: ownerTargetUserId,
+        url: deviceDeepLink,
+        deviceId: typedDevice.id,
+        deviceType: 'freezer_lynk',
+        alertType: 'freezer_high_temp_warning',
+        temperatureF,
+      })
+    }
+  }
 
   if (shouldCreateAlarm) {
-    const { data: alertRow, error: alertErr } = await supabase
+    console.log('Freezer alarm transition')
+
+    if (existingActiveAlert && existingActiveAlert.severity === 'critical') {
+      createdAlarmId = existingActiveAlert.id
+      console.log('Push notification skipped - duplicate/active alert exists')
+    } else {
+      const { data: alertRow, error: alertErr } = await supabase
+        .from('alerts')
+        .insert({
+          tenant_id: alertTenantId,
+          device_id: typedDevice.id,
+          severity: 'critical',
+          title: 'Freezer Lynk Alarm',
+          message: `${typedDevice.name} is too warm: ${temperatureF.toFixed(1)}°F (alarm ${freezerSettings.temp_alarm_high_f.toFixed(1)}°F).`,
+          status: 'active',
+        })
+        .select('id')
+        .single()
+
+      if (alertErr) return fail('insert_alarm_alert', alertErr.message)
+      createdAlarmId = String(alertRow.id)
+      await bestEffortSendPushForAlert(createdAlarmId, {
+        targetUserId: ownerTargetUserId,
+        url: deviceDeepLink,
+        deviceId: typedDevice.id,
+        deviceType: 'freezer_lynk',
+        alertType: 'freezer_high_temp',
+        temperatureF,
+      })
+    }
+  }
+
+  if (shouldCreateRecovery) {
+    console.log('Freezer recovery transition')
+
+    const { data: recoveryRow, error: recoveryErr } = await supabase
       .from('alerts')
       .insert({
+        tenant_id: alertTenantId,
         device_id: typedDevice.id,
-        severity: 'critical',
-        title: `Freezer Alarm · ${typedDevice.name}`,
-        message: `Temperature ${temperatureF.toFixed(1)}°F exceeded alarm threshold ${freezerSettings.temp_alarm_high_f.toFixed(1)}°F for ${freezerSettings.alert_delay_minutes} minute(s).`,
-        status: 'active',
+        severity: 'info',
+        title: 'Freezer Lynk Recovered',
+        message: `${typedDevice.name} is back within spec: ${temperatureF.toFixed(1)}°F (warning ${freezerSettings.temp_warning_high_f.toFixed(1)}°F).`,
+        status: 'resolved',
+        resolved_at: nowIso,
       })
       .select('id')
       .single()
 
-    if (alertErr) return json({ error: alertErr.message }, 500)
-    createdAlarmId = String(alertRow.id)
-    await bestEffortSendPushForAlert(createdAlarmId)
-  }
+    if (recoveryErr) return fail('insert_recovery_alert', recoveryErr.message)
+    createdRecoveryId = String(recoveryRow.id)
 
-  if (shouldCreateRecovery) {
-    const { error: recoveryErr } = await supabase
-      .from('alerts')
-      .insert({
-        device_id: typedDevice.id,
-        severity: 'info',
-        title: `Freezer Recovered · ${typedDevice.name}`,
-        message: `Temperature recovered to ${temperatureF.toFixed(1)}°F (warning threshold ${freezerSettings.temp_warning_high_f.toFixed(1)}°F).`,
-        status: 'resolved',
-        resolved_at: nowIso,
-      })
-
-    if (recoveryErr) return json({ error: recoveryErr.message }, 500)
+    await bestEffortSendPushForAlert(createdRecoveryId, {
+      targetUserId: ownerTargetUserId,
+      url: deviceDeepLink,
+      deviceId: typedDevice.id,
+      deviceType: 'freezer_lynk',
+      alertType: 'freezer_temp_recovered',
+      temperatureF,
+    })
 
     const { error: resolveErr } = await supabase
       .from('alerts')
@@ -301,7 +525,7 @@ serve(async (req: Request) => {
       .eq('status', 'active')
       .in('severity', ['warning', 'critical'])
 
-    if (resolveErr) return json({ error: resolveErr.message }, 500)
+    if (resolveErr) return fail('resolve_active_alerts', resolveErr.message)
   }
 
   const { error: upsertStateErr } = await supabase
@@ -315,12 +539,12 @@ serve(async (req: Request) => {
       alarm_started_at: nextAlarmStartedAt,
       alarm_active: alarmActive,
       last_reading_at: nowIso,
-      last_alert_id: createdAlarmId,
+      last_alert_id: createdAlarmId ?? createdWarningId,
       last_recovery_at: shouldCreateRecovery ? nowIso : null,
       updated_at: nowIso,
     })
 
-  if (upsertStateErr) return json({ error: upsertStateErr.message }, 500)
+  if (upsertStateErr) return fail('upsert_telemetry_state', upsertStateErr.message)
 
   const metadata = {
     ...(typedDevice.metadata ?? {}),
@@ -346,21 +570,18 @@ serve(async (req: Request) => {
 
   const resolvedLocation = (typedDevice.location ?? '').trim() || configuredLocationLabel || null
 
-  const { error: updateDeviceErr } = await supabase
-    .from('devices')
-    .update({
-      status: deviceStatus,
-      online: true,
-      location: resolvedLocation,
-      last_seen: nowIso,
-      last_seen_at: nowIso,
-      firmware_version: payload.firmware_version ?? null,
-      metadata,
-      updated_at: nowIso,
-    })
-    .eq('id', typedDevice.id)
+  const updateDeviceErr = await updateDeviceWithColumnFallback(supabase, typedDevice.id, {
+    status: deviceStatus,
+    online: true,
+    location: resolvedLocation,
+    last_seen: nowIso,
+    last_seen_at: nowIso,
+    firmware_version: payload.firmware_version ?? null,
+    metadata,
+    updated_at: nowIso,
+  })
 
-  if (updateDeviceErr) return json({ error: updateDeviceErr.message }, 500)
+  if (updateDeviceErr) return fail('update_device_snapshot', updateDeviceErr)
 
   return json({
     ok: true,

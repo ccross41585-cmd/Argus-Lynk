@@ -27,6 +27,7 @@ import {
   subscribeToAlerts,
   subscribeToDevices,
 } from '../lib/dashboardData'
+import { getDeviceOnlineStatus } from '../lib/deviceOnlineStatus'
 import { isSupabaseConfigured, supabase } from '../lib/supabase'
 import { loadUserProfile } from '../lib/userProfile'
 import { fetchWeather, type LiveWeather } from '../lib/weather'
@@ -291,6 +292,19 @@ export function DashboardPage() {
     }
   }, [devices])
 
+  useEffect(() => {
+    for (const device of devices) {
+      if (device.type !== 'fence') continue
+      console.log('[ONLINE STATUS]', device.name, {
+        onlineField: device.online,
+        last_seen: device.last_seen,
+        last_heartbeat: device.last_heartbeat,
+        updated_at: device.updated_at,
+        computed: getDeviceOnlineStatus(device),
+      })
+    }
+  }, [devices])
+
   // Detect fence ON→OFF transitions and schedule a 1-minute rearm reminder.
   useEffect(() => {
     if (!overview) return
@@ -343,7 +357,7 @@ export function DashboardPage() {
   }, [devices])
 
   const nodesOnlineText = useMemo(() => {
-    const n = devices.filter((d) => d.status !== 'offline' && d.status !== 'critical').length
+    const n = devices.filter((d) => getDeviceOnlineStatus(d).online).length
     return `${n}/${devices.length}`
   }, [devices])
 
@@ -358,7 +372,11 @@ export function DashboardPage() {
 
     const fenceDevice = devices.find((d) => d.type === 'fence')
     const fenceContactor = String(fenceDevice?.metadata.contactor_feedback ?? '').toUpperCase()
+    const fenceConnection = fenceDevice
+      ? getDeviceOnlineStatus(fenceDevice)
+      : { online: false, label: 'OFFLINE' as const, lastSeenMs: 0, ageMs: null }
     const fenceTone = ((): DashboardTone => {
+      if (!fenceConnection.online) return 'neutral'
       if (fenceContactor === 'STUCK ON') return 'danger'
       if (fenceContactor === 'FAILED')   return 'warning'
       if (overview.fenceLine.chargerPower === 'ON') return 'success'
@@ -374,8 +392,8 @@ export function DashboardPage() {
       hasFence || !isSupabaseConfigured ? {
         icon: 'fence' as StatusCardIcon,
         label: 'Fence',
-        status: fenceStatus,
-        detail: overview.fenceLine.verificationNote,
+        status: `State: ${fenceStatus}`,
+        detail: `Connection: ${fenceConnection.label} · ${overview.fenceLine.verificationNote}`,
         tone: fenceTone,
       } : null,
       hasWellPump || !isSupabaseConfigured ? {
@@ -394,7 +412,7 @@ export function DashboardPage() {
           ? ('danger' as const)
           : overview.freezer.state === 'Warning'
             ? ('warning' as const)
-            : ('success' as const),
+            : ('info' as const),
       } : null,
       hasDriveway || !isSupabaseConfigured ? {
         icon: 'driveway' as StatusCardIcon,

@@ -23,6 +23,9 @@ export interface Device {
   online: boolean
   last_seen: string | null
   last_seen_at?: string | null
+  last_heartbeat?: string | null
+  lastHeartbeat?: string | null
+  lastSeen?: string | null
   firmware_version?: string | null
   created_at?: string
   rssi: number | string | null

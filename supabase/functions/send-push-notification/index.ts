@@ -25,6 +25,13 @@ interface RequestPayload {
   alertId: string
   /** Optional: send only to a specific user (useful for tests) */
   targetUserId?: string
+  /** Optional: deep link route for notification click */
+  url?: string
+  /** Optional: enrich push data payload */
+  deviceId?: string
+  deviceType?: string
+  alertType?: string
+  temperatureF?: number
 }
 
 // ── Vapid signing helpers ─────────────────────────────────────────────────────
@@ -343,6 +350,10 @@ serve(async (req: Request) => {
     .select('id, user_id, endpoint, p256dh, auth, device_label')
     .eq('enabled', true)
 
+  if (body.targetUserId) {
+    subsQuery = subsQuery.eq('user_id', body.targetUserId)
+  }
+
   if (alertRow.tenant_id) {
     subsQuery = subsQuery.eq('tenant_id', alertRow.tenant_id)
   }
@@ -365,7 +376,8 @@ serve(async (req: Request) => {
   }
 
   // 3. Build payload
-  const alertUrl = `/alerts/${alertRow.id}`
+  const alertUrl = body.url || `/alerts/${alertRow.id}`
+  const payloadDeviceId = body.deviceId || alertRow.device_id
   const pushPayload = JSON.stringify({
     title: alertRow.title || 'Argus Lynk Alert',
     body: alertRow.message,
@@ -376,8 +388,12 @@ serve(async (req: Request) => {
     data: {
       url: alertUrl,
       alertId: alertRow.id,
-      deviceId: alertRow.device_id,
+      deviceId: payloadDeviceId,
       severity: alertRow.severity,
+      device_id: payloadDeviceId,
+      device_type: body.deviceType,
+      alert_type: body.alertType,
+      temperature_f: body.temperatureF,
     },
     actions: [
       { action: 'open', title: 'Open' },

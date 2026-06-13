@@ -81,7 +81,12 @@ export interface DashboardDevice {
   sort_order: number
   pinned?: boolean
   status: DeviceHealthStatus
+  online?: boolean
+  confirmed_state?: string | null
+  desired_state?: string | null
   last_seen: string
+  last_heartbeat?: string | null
+  updated_at?: string
   metadata: Record<string, string | number | boolean | null | number[]>
 }
 

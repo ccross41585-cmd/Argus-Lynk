@@ -1,13 +1,11 @@
 import { useEffect, useState } from 'react'
 import { StatusPill } from '../components/StatusPill'
+import { getDeviceOnlineStatus } from '../lib/deviceOnlineStatus'
 import { getDashboardStatus, getDevices } from '../lib/dashboardMock'
 import type { DashboardDevice, DashboardOverview, DashboardTone } from '../types/dashboard'
 
-function statusTone(status: string): DashboardTone {
-  if (status === 'critical' || status === 'offline') return 'neutral'
-  if (status === 'warning') return 'warning'
-  if (status === 'online') return 'success'
-  return 'info'
+function statusTone(online: boolean): DashboardTone {
+  return online ? 'success' : 'neutral'
 }
 
 function formatLastSeen(iso: string) {
@@ -31,6 +29,19 @@ export function SystemPage() {
     })
   }, [])
 
+  useEffect(() => {
+    for (const device of devices) {
+      if (device.type !== 'fence') continue
+      console.log('[ONLINE STATUS]', device.name, {
+        onlineField: device.online,
+        last_seen: device.last_seen,
+        last_heartbeat: device.last_heartbeat,
+        updated_at: device.updated_at,
+        computed: getDeviceOnlineStatus(device),
+      })
+    }
+  }, [devices])
+
   if (isLoading || !overview) {
     return (
       <div className="system-page">
@@ -41,7 +52,7 @@ export function SystemPage() {
 
   const gateway = devices.find((d) => d.type === 'gateway')
   const fieldNodes = devices.filter((d) => d.type !== 'gateway')
-  const onlineCount = fieldNodes.filter((d) => d.status !== 'offline').length
+  const onlineCount = fieldNodes.filter((d) => getDeviceOnlineStatus(d).online).length
 
   return (
     <div className="system-page">
@@ -122,7 +133,7 @@ export function SystemPage() {
             <div key={node.id} className="nodes-table__row">
               <span>{node.name}</span>
               <span className="value-mono">{node.type}</span>
-              <StatusPill tone={statusTone(node.status)}>{node.status}</StatusPill>
+              <StatusPill tone={statusTone(getDeviceOnlineStatus(node).online)}>{getDeviceOnlineStatus(node).label}</StatusPill>
               <span className="value-muted">{formatLastSeen(node.last_seen)}</span>
             </div>
           ))}

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { StatusPill } from '../components/StatusPill'
 import { getLiveDevices } from '../lib/dashboardData'
+import { getDeviceOnlineStatus } from '../lib/deviceOnlineStatus'
 import { getDevices } from '../lib/dashboardMock'
 import { isSupabaseConfigured } from '../lib/supabase'
 import type { DashboardDevice, DashboardTone } from '../types/dashboard'
@@ -106,7 +107,20 @@ export function DevicesPage() {
     return map
   }, [devices])
 
-  const onlineCount = devices.filter((d) => d.status !== 'offline').length
+  const onlineCount = devices.filter((d) => getDeviceOnlineStatus(d).online).length
+
+  useEffect(() => {
+    for (const device of devices) {
+      if (device.type !== 'fence') continue
+      console.log('[ONLINE STATUS]', device.name, {
+        onlineField: device.online,
+        last_seen: device.last_seen,
+        last_heartbeat: device.last_heartbeat,
+        updated_at: device.updated_at,
+        computed: getDeviceOnlineStatus(device),
+      })
+    }
+  }, [devices])
 
   if (isLoading) {
     return (

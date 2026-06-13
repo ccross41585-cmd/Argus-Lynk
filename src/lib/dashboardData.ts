@@ -13,6 +13,7 @@
  */
 
 import { supabase } from './supabase'
+import { getDeviceOnlineStatus } from './deviceOnlineStatus'
 import type {
   AlertRecord,
   CommandRecord,
@@ -21,6 +22,47 @@ import type {
   DashboardOverview,
 } from '../types/dashboard'
 import type { Device } from '../types/domain'
+
+const DEVICE_SELECT_COLUMNS = [
+  'id',
+  'tenant_id',
+  'name',
+  'type',
+  'device_type',
+  'status',
+  'online',
+  'confirmed_state',
+  'desired_state',
+  'last_seen',
+  'last_seen_at',
+  'last_heartbeat',
+  'updated_at',
+  'location',
+  'gateway_id',
+  'battery_voltage',
+  'rssi',
+  'metadata',
+].join(', ')
+
+const DEVICE_SELECT_COLUMNS_FALLBACK = [
+  'id',
+  'tenant_id',
+  'name',
+  'type',
+  'device_type',
+  'status',
+  'online',
+  'confirmed_state',
+  'desired_state',
+  'last_seen',
+  'last_seen_at',
+  'updated_at',
+  'location',
+  'gateway_id',
+  'battery_voltage',
+  'rssi',
+  'metadata',
+].join(', ')
 
 // ── Type mapping ──────────────────────────────────────────────────────────────
 
@@ -60,12 +102,13 @@ function isContactorFault(fb: string): fb is ContactorFault {
 }
 
 function deviceStatus(row: Device): DashboardDevice['status'] {
+  const connection = getDeviceOnlineStatus(row)
+  if (!connection.online) return 'offline'
+
   const dbStatus = String(row.status ?? '').toLowerCase()
   if (dbStatus === 'alarm') return 'critical'
   if (dbStatus === 'low_battery') return 'warning'
-  if (dbStatus === 'offline') return 'offline'
-  if (dbStatus === 'online') return 'online'
-  return row.online ? 'online' : 'offline'
+  return 'online'
 }
 
 function asFiniteNumber(value: unknown): number | null {
@@ -96,6 +139,7 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
   const base = (row.metadata ?? {}) as Record<string, string | number | boolean | null | number[]>
   const desired    = (row.desired_state    ?? '').toUpperCase()  // '' | 'ON' | 'OFF'
   const confirmed  = (row.confirmed_state  ?? '').toUpperCase()  // '' | 'ON' | 'OFF'
+  const connection = getDeviceOnlineStatus(row)
 
   // Contactor feedback stored in metadata by the gateway on each ACK / HB.
   const contactorFeedback = (base.contactor_feedback as string | null) ?? '—'
@@ -107,7 +151,7 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
   // de-energizes when the field node loses power.
   // Anything else      = fall back to the last commanded state from the gateway.
   const chargerPower = (() => {
-    if (!row.online) return 'OFF'
+    if (!connection.online) return 'OFF'
     if (contactorFeedback === 'CONFIRMED' || contactorFeedback === 'STUCK_ON') return 'ON'
     if (contactorFeedback === 'FAILED'    || contactorFeedback === 'OPEN')     return 'OFF'
     return confirmed || desired || '—'
@@ -218,6 +262,7 @@ async function withFreezerMetadata(rows: Device[]): Promise<Device[]> {
 
 export function mapDevice(row: Device): DashboardDevice {
   const type = toDashboardType(String(row.device_type ?? row.type ?? ''))
+  const connection = getDeviceOnlineStatus(row)
   const baseMeta = type === 'fence' ? fenceMeta(row)
     : ((row.metadata ?? {}) as Record<string, string | number | boolean | null | number[]>)
 
@@ -247,7 +292,12 @@ export function mapDevice(row: Device): DashboardDevice {
     sort_order: 0,
     pinned:     type === 'fence',
     status,
-    last_seen:  row.last_seen_at ?? row.last_seen ?? new Date().toISOString(),
+    online: connection.online,
+    confirmed_state: row.confirmed_state ?? null,
+    desired_state: row.desired_state ?? null,
+    last_seen:  row.last_seen_at ?? row.last_seen ?? row.last_heartbeat ?? row.updated_at ?? new Date().toISOString(),
+    last_heartbeat: row.last_heartbeat ?? row.lastHeartbeat ?? null,
+    updated_at: row.updated_at,
     metadata:   meta,
   }
 }
@@ -418,10 +468,20 @@ export function generateContactorAlerts(
 
 export async function getLiveDevices(): Promise<DashboardDevice[]> {
   if (!supabase) return []
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('devices')
-    .select('*')
+    .select(DEVICE_SELECT_COLUMNS)
     .order('name')
+
+  if (error?.message?.toLowerCase().includes('last_heartbeat')) {
+    const fallbackRes = await supabase
+      .from('devices')
+      .select(DEVICE_SELECT_COLUMNS_FALLBACK)
+      .order('name')
+    data = fallbackRes.data
+    error = fallbackRes.error
+  }
+
   if (error || !data) {
     console.error('getLiveDevices:', error?.message)
     return []
