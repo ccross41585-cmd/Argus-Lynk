@@ -16,6 +16,9 @@ interface NotificationData {
   alertId?: string
   deviceId?: string
   severity?: string
+  source_label?: string
+  source_type?: string | null
+  device_name?: string | null
   commandOptions?: string[]
 }
 

@@ -21,6 +21,13 @@ interface AlertRow {
   tenant_id: string | null
 }
 
+interface DeviceRow {
+  id: string
+  name: string
+  type: string | null
+  device_type: string | null
+}
+
 interface RequestPayload {
   alertId: string
   /** Optional: send only to a specific user (useful for tests) */
@@ -32,6 +39,34 @@ interface RequestPayload {
   deviceType?: string
   alertType?: string
   temperatureF?: number
+}
+
+function normalizeDeviceType(deviceType: string | null | undefined): string | null {
+  const value = String(deviceType ?? '').trim().toLowerCase()
+  if (!value) return null
+  if (value === 'fence_controller') return 'field_lynk'
+  if (value === 'freezer_lynk' || value === 'freezer_alarm') return 'freezer_lynk'
+  if (value === 'pump_controller') return 'well_pump_lynk'
+  return value
+}
+
+function sourceLabelForDeviceType(deviceType: string | null | undefined): string {
+  switch (normalizeDeviceType(deviceType)) {
+    case 'field_lynk':
+      return 'Field Lynk'
+    case 'freezer_lynk':
+      return 'Freezer Lynk'
+    case 'well_pump_lynk':
+      return 'Well Pump Lynk'
+    default:
+      return 'Argus Lynk'
+  }
+}
+
+function buildNotificationTitle(title: string, sourceLabel: string): string {
+  const trimmedTitle = title.trim() || 'Alert'
+  if (trimmedTitle.toLowerCase().startsWith(sourceLabel.toLowerCase())) return trimmedTitle
+  return `${sourceLabel}: ${trimmedTitle}`
 }
 
 // ── Vapid signing helpers ─────────────────────────────────────────────────────
@@ -342,6 +377,26 @@ serve(async (req: Request) => {
   const alertRow = alert as AlertRow
   console.log(`[HANDLER] Alert loaded: "${alertRow.title}" severity=${alertRow.severity} tenant=${alertRow.tenant_id ?? 'null'}`)
 
+  let resolvedDeviceType = body.deviceType ?? null
+  let resolvedDeviceName: string | null = null
+  if (alertRow.device_id) {
+    const { data: deviceRow } = await supabase
+      .from('devices')
+      .select('id, name, type, device_type')
+      .eq('id', alertRow.device_id)
+      .maybeSingle()
+
+    if (deviceRow) {
+      const typedDevice = deviceRow as DeviceRow
+      resolvedDeviceType = resolvedDeviceType ?? typedDevice.device_type ?? typedDevice.type
+      resolvedDeviceName = typedDevice.name
+    }
+  }
+
+  const sourceLabel = sourceLabelForDeviceType(resolvedDeviceType)
+  const notificationTitle = buildNotificationTitle(alertRow.title || 'Argus Lynk Alert', sourceLabel)
+  const sourceType = normalizeDeviceType(resolvedDeviceType)
+
   // 2. Load enabled subscriptions.
   // When tenant_id is null (e.g. gateway-inserted alert), send to ALL enabled
   // subscriptions so device-level alerts always reach users.
@@ -379,7 +434,7 @@ serve(async (req: Request) => {
   const alertUrl = body.url || `/alerts/${alertRow.id}`
   const payloadDeviceId = body.deviceId || alertRow.device_id
   const pushPayload = JSON.stringify({
-    title: alertRow.title || 'Argus Lynk Alert',
+    title: notificationTitle,
     body: alertRow.message,
     icon: '/app-icon2.png',
     badge: '/app-icon2.png',
@@ -390,8 +445,11 @@ serve(async (req: Request) => {
       alertId: alertRow.id,
       deviceId: payloadDeviceId,
       severity: alertRow.severity,
+      source_label: sourceLabel,
+      source_type: sourceType,
+      device_name: resolvedDeviceName,
       device_id: payloadDeviceId,
-      device_type: body.deviceType,
+      device_type: sourceType,
       alert_type: body.alertType,
       temperature_f: body.temperatureF,
     },
