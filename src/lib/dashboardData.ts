@@ -209,7 +209,6 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
   // If the device is offline (stale last_seen), assume OFF — the relay is
   // normally-open so it de-energizes when the field node loses power.
   // Anything else      = fall back to the last commanded state from the gateway.
-  const connection = getDeviceOnlineStatus(row)
   const chargerPower = (() => {
     if (!connection.online) {
       console.log(
