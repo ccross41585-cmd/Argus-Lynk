@@ -13,7 +13,7 @@
  */
 
 import { supabase } from './supabase'
-import { getDeviceOnlineStatus } from './deviceOnlineStatus'
+import { getDeviceOnlineStatus, ONLINE_TIMEOUT_MS } from './deviceOnlineStatus'
 import type {
   AlertRecord,
   CommandRecord,
@@ -22,6 +22,24 @@ import type {
   DashboardOverview,
 } from '../types/dashboard'
 import type { Device } from '../types/domain'
+
+// ── Connection freshness ──────────────────────────────────────────────────────
+
+// Re-export the canonical timeout so callers can import from either module.
+export const OFFLINE_TIMEOUT_MS = ONLINE_TIMEOUT_MS
+
+/**
+ * Convenience boolean helper. Delegates to getDeviceOnlineStatus so there is
+ * exactly one implementation of the freshness logic.
+ */
+export function isDeviceOnline(device: {
+  last_seen?: string | null
+  last_seen_at?: string | null
+  last_heartbeat?: string | null
+  updated_at?: string | null
+}): boolean {
+  return getDeviceOnlineStatus(device).online
+}
 
 const DEVICE_SELECT_COLUMNS_FALLBACK = [
   'id',
@@ -188,11 +206,17 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
   // Use the physical contactor state when we have reliable aux feedback.
   // CONFIRMED/STUCK_ON = contactor is physically closed (energized).
   // FAILED/OPEN        = contactor is physically open (de-energized).
-  // If the device is offline, assume OFF — the relay is normally-open so it
-  // de-energizes when the field node loses power.
+  // If the device is offline (stale last_seen), assume OFF — the relay is
+  // normally-open so it de-energizes when the field node loses power.
   // Anything else      = fall back to the last commanded state from the gateway.
+  const connection = getDeviceOnlineStatus(row)
   const chargerPower = (() => {
-    if (!connection.online) return 'OFF'
+    if (!connection.online) {
+      console.log(
+        `[fenceMeta] device=${row.id} last_seen=${row.last_seen ?? 'null'} — treating charger_power as OFF (stale)`,
+      )
+      return 'OFF'
+    }
     if (contactorFeedback === 'CONFIRMED' || contactorFeedback === 'STUCK_ON') return 'ON'
     if (contactorFeedback === 'FAILED'    || contactorFeedback === 'OPEN')     return 'OFF'
     return confirmed || desired || '—'
@@ -336,8 +360,10 @@ export function mapDevice(row: Device): DashboardDevice {
     online: connection.online,
     confirmed_state: row.confirmed_state ?? null,
     desired_state: row.desired_state ?? null,
-    last_seen:  row.last_seen_at ?? row.last_seen ?? row.last_heartbeat ?? row.updated_at ?? new Date().toISOString(),
-    last_heartbeat: row.last_heartbeat ?? row.lastHeartbeat ?? null,
+    // Always use last_seen as the primary heartbeat timestamp.
+    // last_seen_at and last_heartbeat are fallbacks for legacy rows only.
+    last_seen:  row.last_seen ?? row.last_seen_at ?? row.last_heartbeat ?? row.updated_at ?? new Date().toISOString(),
+    last_heartbeat: row.last_heartbeat ?? null,
     updated_at: row.updated_at,
     metadata:   meta,
   }
@@ -391,7 +417,7 @@ export function buildOverview(devices: DashboardDevice[]): DashboardOverview {
     lastUpdated: now,
     fenceLine: {
       chargerPower:     fencePower,
-      fieldNode:        fence ? (fence.status !== 'offline' ? 'Online' : 'Offline') : 'Offline',
+      fieldNode:        fence ? (isDeviceOnline(fence) ? 'Online' : 'Offline') : 'Offline',
       lastCommand:      fenceLastCmd,
       feedback:         fenceFeedback,
       verificationNote: fenceVerificationNote,
@@ -418,7 +444,7 @@ export function buildOverview(devices: DashboardDevice[]): DashboardOverview {
               ? 'Warning'
               : 'Normal',
       safeRange:        `Warn > ${String(freezer?.metadata.warning_high_f ?? 5)}°F · Alarm > ${String(freezer?.metadata.alarm_high_f ?? 10)}°F`,
-      node:             freezer && freezer.status !== 'offline' ? 'Online' : 'Offline',
+      node:             freezer && isDeviceOnline(freezer) ? 'Online' : 'Offline',
       lastUpdatedLabel: String(freezer?.metadata.updated ?? '—'),
     },
     drivewayAlarm: {
@@ -479,9 +505,12 @@ export function generateContactorAlerts(
     })
   }
 
-  // If the fence is online but has never sent aux_raw, generate a "feedback unknown" notice.
+  // If the fence is online (fresh last_seen) but has never sent aux_raw, generate a "feedback unknown" notice.
   for (const device of devices) {
-    if (device.type !== 'fence' || device.status === 'offline') continue
+    if (device.type !== 'fence') continue
+    // Use freshness of last_seen to determine if the device is reachable.
+    const ageMs = device.last_seen ? Date.now() - new Date(device.last_seen).getTime() : Infinity
+    if (ageMs >= OFFLINE_TIMEOUT_MS) continue  // device is stale — no alert needed
     const auxRaw = String(device.metadata.aux_raw ?? '')
     if (auxRaw) continue  // aux_raw present — no warning needed
     const warnId = `synth-${device.id}-aux_raw_missing`

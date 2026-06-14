@@ -5,12 +5,29 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <ArduinoOTA.h>
 #include <time.h>
 #include <math.h>
 #include "gateway_secrets.h"
 
 // Human-readable gateway identity stored in device_commands.gateway_id.
 const char* GATEWAY_ID = "home-base-001";
+
+// ── Firmware identity ─────────────────────────────────────────────────────────
+// Bump DEVICE_FIRMWARE_VERSION on every release build.
+//
+// TODO (future cloud-OTA): Compare DEVICE_FIRMWARE_VERSION against a
+//   devices.target_firmware_version column in Supabase to drive staged rollout,
+//   update-available notifications, and rollback tracking.  The gateway OTA
+//   hostname is argus-gateway-<GATEWAY_ID> (e.g. argus-gateway-home-base-001).
+const char* DEVICE_FIRMWARE_VERSION = "1.1.0";
+const char* DEVICE_BUILD_DATE       = "2026-06-13";
+const char* DEVICE_ROLE             = "gateway";
+const bool  OTA_SUPPORTED           = true;
+
+// Gateway has no relay, so this is a no-op placeholder for symmetry with the
+// field node.  Set true if a future gateway variant needs a safe-state action.
+const bool OTA_SAFE_MODE_RELAY_OFF = false;
 
 const bool DEBUG_VERBOSE = false;
 
@@ -66,6 +83,7 @@ bool oledOk = false;
 bool wifiOk = false;
 bool supabaseOk = false;
 bool loraOk = false;
+bool otaBusy = false;  // true while ArduinoOTA is flashing — gates LoRa + Supabase ops
 String lastFenceState = "UNKNOWN";
 String lastCommandText = "NONE";
 String lastAckText = "NONE";
@@ -404,11 +422,16 @@ bool markCommandAcknowledged(const PendingCommand& command, const String& confir
   DynamicJsonDocument deviceBody(512);
   deviceBody["confirmed_state"] = confirmedState;
   deviceBody["online"] = true;
+  deviceBody["status"] = "online";
 
   String lastSeen = timestampNow();
   if (lastSeen.length() > 0) {
-    deviceBody["last_seen"] = lastSeen;
+    deviceBody["last_seen"]    = lastSeen;
+    deviceBody["last_seen_at"] = lastSeen;
   }
+
+  Serial.printf("[ACK] Updating device %s: online=true status=online last_seen=%s\n",
+    command.deviceId.c_str(), lastSeen.c_str());
 
   String deviceUrl = buildApiUrl("devices?id=eq." + command.deviceId);
   String devicePayload;
@@ -423,7 +446,11 @@ bool markCommandAcknowledged(const PendingCommand& command, const String& confir
   return true;
 }
 
-bool updateDeviceContactorFeedback(const String& deviceId, const String& contactorFeedback, const String& auxRaw) {
+bool updateDeviceContactorFeedback(const String& deviceId,
+                                   const String& contactorFeedback,
+                                   const String& auxRaw,
+                                   const String& fieldFirmwareVersion = "",
+                                   bool fieldWifiConnected = false) {
   if (contactorFeedback.length() == 0 && auxRaw.length() == 0) {
     return true;
   }
@@ -438,9 +465,9 @@ bool updateDeviceContactorFeedback(const String& deviceId, const String& contact
   String fetchPayload = http.getString();
   http.end();
 
-  DynamicJsonDocument merged(512);
+  DynamicJsonDocument merged(1024);
   if (fetchStatus >= 200 && fetchStatus < 300) {
-    DynamicJsonDocument fetched(512);
+    DynamicJsonDocument fetched(1024);
     if (!deserializeJson(fetched, fetchPayload) && fetched.is<JsonArray>() && fetched[0]["metadata"].is<JsonObject>()) {
       merged.set(fetched[0]["metadata"].as<JsonObject>());
     }
@@ -449,14 +476,38 @@ bool updateDeviceContactorFeedback(const String& deviceId, const String& contact
   if (auxRaw.length() > 0) {
     merged["aux_raw"] = auxRaw;
   }
+  // Persist firmware info reported by the field node in the HB packet.
+  if (fieldFirmwareVersion.length() > 0) {
+    merged["device_role"]    = "field_node";
+    merged["ota_supported"]  = fieldWifiConnected;  // OTA requires WiFi on field node
+    merged["wifi_connected"] = fieldWifiConnected;
+  }
 
-  DynamicJsonDocument patchBody(512);
-  patchBody["metadata"] = merged;
+  String nowTs = timestampNow();
+
+  DynamicJsonDocument patchBody(1024);
+  patchBody["metadata"]  = merged;
+  patchBody["online"]    = true;
+  patchBody["status"]    = "online";
+  if (nowTs.length() > 0) {
+    patchBody["last_seen"]    = nowTs;
+    patchBody["last_seen_at"] = nowTs;
+  }
+  // Write firmware_version to the top-level column when the field node reports it.
+  if (fieldFirmwareVersion.length() > 0) {
+    patchBody["firmware_version"] = fieldFirmwareVersion;
+  }
+
+  Serial.printf("[HB] Updating device %s: online=true status=online last_seen=%s fb=%s aux=%s fw=%s wifi=%s\n",
+    deviceId.c_str(), nowTs.c_str(), contactorFeedback.c_str(), auxRaw.c_str(),
+    fieldFirmwareVersion.length() > 0 ? fieldFirmwareVersion.c_str() : "(none)",
+    fieldWifiConnected ? "1" : "0");
+
   String patchPayload;
   serializeJson(patchBody, patchPayload);
 
   String patchUrl = buildApiUrl("devices?id=eq." + deviceId);
-  return sendJsonPatch(patchUrl, patchPayload, "PATCH devices contactor feedback");
+  return sendJsonPatch(patchUrl, patchPayload, "PATCH devices heartbeat");
 }
 
 // ── Alert creation + push notification ─────────────────────────────────────────────
@@ -973,6 +1024,15 @@ void processHeartbeatIfReady() {
 
   Serial.printf("HB received: state=%s fb=%s aux=%s\n",
     hbState.c_str(), hbFb.c_str(), hbAux.c_str());
+
+  // Optional fields added in firmware 1.1.0+ — gracefully absent on older nodes.
+  String hbFirmwareVersion  = packetPart(packet, 7);  // e.g. "1.1.0"; empty on old firmware
+  bool   hbWifiConnected    = (packetPart(packet, 8) == "1");
+
+  if (hbFirmwareVersion.length() > 0) {
+    Serial.printf("HB firmware: version=%s wifi=%s\n",
+      hbFirmwareVersion.c_str(), hbWifiConnected ? "yes" : "no");
+  }
   // Show physical contactor feedback on OLED when a fault exists,
   // otherwise show the commanded state (ON/OFF).
   if (hbFb == "FAILED" || hbFb == "STUCK_ON") {
@@ -1010,7 +1070,8 @@ void processHeartbeatIfReady() {
   }
 
   if (cachedFenceDeviceId.length() > 0) {
-    updateDeviceContactorFeedback(cachedFenceDeviceId, hbFb, hbAux);
+    updateDeviceContactorFeedback(cachedFenceDeviceId, hbFb, hbAux,
+                                  hbFirmwareVersion, hbWifiConnected);
   } else {
     Serial.println("HB: no cached device ID yet — skipping Supabase update");
   }
@@ -1055,6 +1116,86 @@ void fetchFenceDeviceId() {
   Serial.printf("Fence device ID: %s\n", cachedFenceDeviceId.c_str());
 }
 
+// ── ArduinoOTA ──────────────────────────────────────────────────────────────────────
+
+void setupOTA() {
+  // OTA hostname: argus-gateway-<GATEWAY_ID>  (e.g. argus-gateway-home-base-001)
+  String hostname = String("argus-gateway-") + String(GATEWAY_ID);
+  ArduinoOTA.setHostname(hostname.c_str());
+
+  ArduinoOTA.onStart([]() {
+    otaBusy = true;
+    const char* type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+    Serial.printf("[OTA] Start — type: %s\n", type);
+    if (oledOk) {
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0, 0);
+      display.println("OTA Start");
+      display.println(type);
+      display.display();
+    }
+  });
+
+  ArduinoOTA.onEnd([]() {
+    otaBusy = false;
+    Serial.println("[OTA] Success — rebooting.");
+    if (oledOk) {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("OTA Success");
+      display.println("Rebooting...");
+      display.display();
+    }
+  });
+
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    uint8_t pct = (uint8_t)((progress * 100UL) / total);
+    Serial.printf("[OTA] Progress: %u%%\n", pct);
+    if (oledOk) {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("OTA Progress");
+      display.print(pct);
+      display.println("%");
+      display.display();
+    }
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    otaBusy = false;
+    Serial.printf("[OTA] Error [%u]: ", (unsigned)error);
+    if      (error == OTA_AUTH_ERROR)    Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR)   Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR)     Serial.println("End Failed");
+    else                                 Serial.println("Unknown");
+    if (oledOk) {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("OTA Error");
+      display.print("Code: ");
+      display.println((int)error);
+      display.display();
+    }
+  });
+
+  ArduinoOTA.begin();
+  Serial.print("[OTA] Ready. Hostname: ");
+  Serial.println(hostname);
+  if (oledOk) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("OTA Ready");
+    // Truncate hostname to fit 21 chars per OLED line at text size 1.
+    display.println(hostname.substring(0, 21));
+    display.display();
+    delay(1000);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -1065,6 +1206,7 @@ void setup() {
   drawScreen();
   connectToWifi();
   syncClock();
+  setupOTA();            // Must come after WiFi is connected.
   fetchFenceDeviceId();  // Populate cachedFenceDeviceId before first HB arrives.
   drawScreen();
   initializeLoRa();
@@ -1078,6 +1220,17 @@ void setup() {
 
 void loop() {
   ensureWifiConnected();
+
+  // ArduinoOTA must poll every loop iteration to catch incoming OTA connections.
+  // It never blocks; the onStart callback sets otaBusy=true for the duration
+  // of the flash, which gates all LoRa and Supabase operations below.
+  ArduinoOTA.handle();
+
+  if (otaBusy) {
+    // Flash write in progress — yield immediately and skip all field operations.
+    delay(25);
+    return;
+  }
 
   // Drain any incoming HB packets while idle between polls.
   processHeartbeatIfReady();
@@ -1096,8 +1249,47 @@ void loop() {
     // so the dashboard reflects that the fence is de-energized (relay defaults
     // to open when the field node loses power).
     if (cachedFenceDeviceId.length() > 0) {
-      DynamicJsonDocument offlineBody(128);
-      offlineBody["online"] = false;
+      // IMPORTANT: Do NOT touch last_seen or last_seen_at here.
+      // Those columns must only be updated when the device is actually heard from.
+      // last_seen freshness is used by the PWA as the sole source of truth for
+      // connection state — writing now() here would hide the real silence period.
+      String offlineTs = timestampNow();
+      Serial.printf("[OFFLINE] Marking device %s offline. online=false status=offline. last_seen NOT changed.\n",
+        cachedFenceDeviceId.c_str());
+
+      // Step 1: Fetch existing metadata so we can merge without clobbering fields.
+      String fetchUrl = buildApiUrl("devices?id=eq." + cachedFenceDeviceId + "&select=metadata");
+      HTTPClient httpMeta;
+      httpMeta.begin(fetchUrl);
+      httpMeta.addHeader("apikey", SUPABASE_ANON_KEY);
+      httpMeta.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
+      int fetchSt = httpMeta.GET();
+      String fetchBody = httpMeta.getString();
+      httpMeta.end();
+
+      DynamicJsonDocument mergedMeta(1024);
+      if (fetchSt >= 200 && fetchSt < 300) {
+        DynamicJsonDocument fetched(1024);
+        if (!deserializeJson(fetched, fetchBody) && fetched.is<JsonArray>() && fetched[0]["metadata"].is<JsonObject>()) {
+          mergedMeta.set(fetched[0]["metadata"].as<JsonObject>());
+        }
+      }
+      // Set contactor feedback to OPEN so the dashboard shows the fence as OFF.
+      // The relay is normally-open, so it de-energises when the field node loses power.
+      mergedMeta["contactor_feedback"] = "OPEN";
+      // Record the wall-clock time the gateway declared the node offline.
+      // This is intentionally separate from last_seen (which remains at the
+      // last real received timestamp) and is useful for alert dedup / diagnostics.
+      if (offlineTs.length() > 0) {
+        mergedMeta["offline_marked_at"] = offlineTs;
+      }
+
+      // Step 2: Single PATCH — sets online/status and the merged metadata in one request.
+      // last_seen and last_seen_at are deliberately omitted.
+      DynamicJsonDocument offlineBody(1024);
+      offlineBody["online"]   = false;
+      offlineBody["status"]   = "offline";
+      offlineBody["metadata"] = mergedMeta;
       String offlinePayload;
       serializeJson(offlineBody, offlinePayload);
       sendJsonPatch(
@@ -1105,8 +1297,6 @@ void loop() {
         offlinePayload,
         "PATCH device offline (HB timeout)"
       );
-      // Write OPEN feedback so dashboard shows fence as OFF, not stale ON.
-      updateDeviceContactorFeedback(cachedFenceDeviceId, "OPEN", "");
     }
 
     createAndSendAlert(

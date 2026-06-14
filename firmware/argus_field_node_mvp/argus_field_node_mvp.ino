@@ -3,8 +3,48 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+// ── Optional WiFi / OTA ──────────────────────────────────────────────────────────────
+// Copy field_node_secrets.example.h → field_node_secrets.h and define
+// FIELD_NODE_WIFI_SSID / FIELD_NODE_WIFI_PASSWORD to enable WiFi OTA updates.
+// If the file is absent or the credentials are not defined, OTA is silently
+// disabled at compile time and LoRa operation is completely unaffected.
+//
+// TODO (future LoRa-OTA): When the gateway sends an OTA_NOTIFY packet over
+//   LoRa, the field node should wake WiFi, pull the binary from Supabase
+//   Storage or a GitHub Release URL, and apply it via the Arduino OTA API.
+//   The LoRa packet format reserved for this is:
+//     OTA_NOTIFY|<key>|<node>|<target_version>|<download_url>
+//   Current version, target version, staged rollout flag, and rollback hash
+//   will be tracked in Supabase (devices.firmware_version / metadata).
+#if __has_include("field_node_secrets.h")
+  #include "field_node_secrets.h"
+#endif
+
+#ifdef FIELD_NODE_WIFI_SSID
+  #define FIELD_NODE_OTA_AVAILABLE 1
+  #include <WiFi.h>
+  #include <ArduinoOTA.h>
+#else
+  #define FIELD_NODE_OTA_AVAILABLE 0
+#endif
+
 const String NETWORK_KEY = "farm123";
 const String NODE_ID = "fence1";
+
+// ── Firmware identity ────────────────────────────────────────────────────────────────────
+const char* DEVICE_FIRMWARE_VERSION = "1.1.0";
+const char* DEVICE_BUILD_DATE       = "2026-06-13";
+const char* DEVICE_ROLE             = "field_node";
+#if FIELD_NODE_OTA_AVAILABLE
+  const bool OTA_SUPPORTED = true;
+#else
+  const bool OTA_SUPPORTED = false;
+#endif
+
+// Safety flag: set true to force the relay to the idle (off) state before
+// an OTA flash begins.  Left false by default so the relay is preserved
+// across an update unless you deliberately enable this.
+const bool OTA_SAFE_MODE_RELAY_OFF = false;
 
 #define OLED_SDA 17
 #define OLED_SCL 18
@@ -54,7 +94,12 @@ bool commandedOn = false;         // Default commanded state is OFF at boot. Wai
 volatile bool receivedFlag = false;
 bool oledOk = false;
 bool loraOk = false;
-String lastPacketText  = "NONE";
+// WiFi / OTA runtime state (only meaningful when FIELD_NODE_OTA_AVAILABLE==1).
+#if FIELD_NODE_OTA_AVAILABLE
+bool wifiConnected = false;  // true once WiFi.status() == WL_CONNECTED
+bool otaEnabled    = false;  // true once ArduinoOTA.begin() succeeds
+bool otaBusy       = false;  // true while a firmware flash is in progress
+#endifString lastPacketText  = "NONE";
 String lastCommandText = "NONE";
 String lastAckText     = "NONE";
 String lastErrorText   = "";
@@ -177,6 +222,10 @@ void drawScreen() {
   display.print("Radio: ");
   display.println(loraOk ? "READY" : "NO");
   display.println(rssiSnr);
+#if FIELD_NODE_OTA_AVAILABLE
+  display.print("OTA: ");
+  display.println(otaEnabled ? (wifiConnected ? "RDY" : "NoWiFi") : "OFF");
+#endif
   display.display();
 }
 
@@ -296,8 +345,21 @@ void setupRelay() {
 void sendHeartbeat() {
   String fb  = contactorFeedback();
   String raw = auxRawLabel();
+
+  // Optional firmware fields (parts 7 and 8).
+  // The gateway silently ignores these on older builds; newer builds parse them.
+  // Part 6 = millis() (existing), Part 7 = firmware_version, Part 8 = wifi_connected.
+#if FIELD_NODE_OTA_AVAILABLE
+  String wifiStr = wifiConnected ? "1" : "0";
+#else
+  String wifiStr = "0";
+#endif
+
   String packet = "HB|" + NETWORK_KEY + "|" + NODE_ID + "|"
-                  + (commandedOn ? "ON" : "OFF") + "|" + fb + "|" + raw + "|" + String(millis());
+                  + (commandedOn ? "ON" : "OFF") + "|" + fb + "|" + raw + "|"
+                  + String(millis())
+                  + "|" + String(DEVICE_FIRMWARE_VERSION)
+                  + "|" + wifiStr;
   Serial.print("Sending HB: ");
   Serial.println(packet);
   int state = radio.transmit(packet);
@@ -459,6 +521,108 @@ void handleCommandPacket(const String& packet) {
 
 // ── Arduino entry points ──────────────────────────────────────────────────────
 
+// \u2500\u2500 Optional WiFi OTA setup \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+#if FIELD_NODE_OTA_AVAILABLE
+void setupWifiOTA() {
+  Serial.printf("[OTA] Connecting to WiFi: %s\n", FIELD_NODE_WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(FIELD_NODE_WIFI_SSID, FIELD_NODE_WIFI_PASSWORD);
+
+  // Non-blocking: try for up to 10 s; LoRa setup continues regardless.
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 10000) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    wifiConnected = false;
+    otaEnabled    = false;
+    Serial.println("[OTA] WiFi connect failed \u2014 OTA disabled. LoRa continues normally.");
+    return;
+  }
+
+  wifiConnected = true;
+  Serial.print("[OTA] WiFi connected. IP: ");
+  Serial.println(WiFi.localIP());
+
+  // OTA hostname: argus-field-<NODE_ID>  (e.g. argus-field-fence1)
+  String hostname = String("argus-field-") + NODE_ID;
+  ArduinoOTA.setHostname(hostname.c_str());
+
+  ArduinoOTA.onStart([]() {
+    otaBusy = true;
+    Serial.println("[OTA] Start");
+    if (OTA_SAFE_MODE_RELAY_OFF) {
+      // Force relay to idle (safe) state before the flash write begins.
+      // Controlled by the OTA_SAFE_MODE_RELAY_OFF constant at the top of this file.
+      digitalWrite(RELAY_PIN, RELAY_IDLE_LEVEL);
+      Serial.println("[OTA] Relay forced OFF (OTA_SAFE_MODE_RELAY_OFF=true).");
+    }
+    if (oledOk) {
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0, 0);
+      display.println("OTA Start");
+      display.display();
+    }
+  });
+
+  ArduinoOTA.onEnd([]() {
+    otaBusy = false;
+    Serial.println("[OTA] Success \u2014 rebooting.");
+    if (oledOk) {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("OTA Success");
+      display.println("Rebooting...");
+      display.display();
+    }
+  });
+
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    uint8_t pct = (uint8_t)((progress * 100UL) / total);
+    Serial.printf("[OTA] Progress: %u%%\n", pct);
+    if (oledOk) {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.print("OTA ");
+      display.print(pct);
+      display.println("%");
+      display.display();
+    }
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    otaBusy = false;
+    Serial.printf("[OTA] Error [%u]\n", (unsigned)error);
+    if (oledOk) {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("OTA Error");
+      display.print("Code: ");
+      display.println((int)error);
+      display.display();
+    }
+  });
+
+  ArduinoOTA.begin();
+  otaEnabled = true;
+  Serial.print("[OTA] Ready. Hostname: ");
+  Serial.println(hostname);
+  if (oledOk) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("OTA Ready");
+    display.println(hostname.substring(0, 18));
+    display.display();
+    delay(1000);
+  }
+}
+#endif
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -491,11 +655,37 @@ void setup() {
   drawScreen();
   initializeLoRa();
 
+#if FIELD_NODE_OTA_AVAILABLE
+  // WiFi/OTA setup runs after LoRa is ready; a failed WiFi connect does not
+  // block or halt the field node.  LoRa command handling is always available.
+  setupWifiOTA();
+#endif
+
+  Serial.printf("[BOOT] firmware=%s build=%s role=%s ota=%s\n",
+    DEVICE_FIRMWARE_VERSION, DEVICE_BUILD_DATE, DEVICE_ROLE,
+    OTA_SUPPORTED ? "true" : "false");
+
   Serial.print("Listening for node: ");
   Serial.println(NODE_ID);
 }
 
 void loop() {
+#if FIELD_NODE_OTA_AVAILABLE
+  // ArduinoOTA.handle() must run every loop iteration to catch incoming OTA
+  // connections.  It is non-blocking when no OTA client is active.
+  // The onStart callback sets otaBusy=true for the duration of the flash write,
+  // which gates all LoRa, relay, and heartbeat operations below.
+  if (otaEnabled) {
+    ArduinoOTA.handle();
+  }
+
+  if (otaBusy) {
+    // Flash write in progress — skip all LoRa and relay operations.
+    delay(25);
+    return;
+  }
+#endif
+
   // Continuous physical feedback monitoring — prints on any transition.
   // Also sets immediateHeartbeatNeeded if power loss is detected.
   checkFeedbackChange();

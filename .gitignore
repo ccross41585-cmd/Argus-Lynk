@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 firmware/argus_gateway_mvp/gateway_secrets.h
+firmware/argus_field_node_mvp/field_node_secrets.h
 
 # Local environment secrets — never commit
 .env

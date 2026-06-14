@@ -754,6 +754,38 @@ export function DeviceDetailPage() {
               <span className="label">RSSI</span>
               <strong>{device.rssi ?? 'n/a'}</strong>
             </div>
+            <div className="key-value-item">
+              <span className="label">Firmware Version</span>
+              <strong>{device.firmware_version ?? '—'}</strong>
+            </div>
+            <div className="key-value-item">
+              <span className="label">Build Date</span>
+              <strong>{String(device.metadata?.build_date ?? '—')}</strong>
+            </div>
+            <div className="key-value-item">
+              <span className="label">OTA Supported</span>
+              <strong>{device.metadata?.ota_supported ? 'Yes' : 'No'}</strong>
+            </div>
+            <div className="key-value-item">
+              <span className="label">WiFi Connected</span>
+              <strong>{device.metadata?.wifi_connected ? 'Yes' : 'No'}</strong>
+            </div>
+          </div>
+
+          {/* OTA Update placeholder */}
+          <div className="stack" style={{ borderTop: '1px solid var(--border)', paddingTop: '0.75rem' }}>
+            <div>
+              <p className="eyebrow">Firmware Update</p>
+            </div>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setActionMessage(
+                'OTA update support is enabled for WiFi-connected devices. Cloud update flow coming later.'
+              )}
+            >
+              Check for Update
+            </button>
           </div>
 
           <div className="alert-stack">
