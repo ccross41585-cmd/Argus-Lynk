@@ -20,7 +20,7 @@ const char* GATEWAY_ID = "home-base-001";
 //   devices.target_firmware_version column in Supabase to drive staged rollout,
 //   update-available notifications, and rollback tracking.  The gateway OTA
 //   hostname is argus-gateway-<GATEWAY_ID> (e.g. argus-gateway-home-base-001).
-const char* DEVICE_FIRMWARE_VERSION = "1.1.0";
+const char* DEVICE_FIRMWARE_VERSION = "1.1.1";
 const char* DEVICE_BUILD_DATE       = "2026-06-13";
 const char* DEVICE_ROLE             = "gateway";
 const bool  OTA_SUPPORTED           = true;
@@ -177,7 +177,11 @@ void drawScreen() {
   display.print(" DB:");
   display.println(yesNoText(supabaseOk));
   display.print("LoRa:");
-  display.println(yesNoText(loraOk));
+  display.print(yesNoText(loraOk));
+  display.print(" OTA:");
+  display.println(otaBusy ? "BUSY" : "RDY");
+  display.print("FW:");
+  display.println(DEVICE_FIRMWARE_VERSION);
   display.print("Fence:");
   display.println(lastFenceState);
   display.print("Last:");
