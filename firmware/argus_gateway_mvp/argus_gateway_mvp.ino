@@ -107,10 +107,18 @@ struct AckPacket {
 String cachedFenceDeviceId = "";
 
 // Heartbeat fault detection
-unsigned long lastHbReceivedAt = 0;     // millis() when last HB was received from field node
-bool powerLossAlertSent = false;         // Dedup: cleared when feedback returns to healthy
-bool nodeOfflineAlertSent = false;       // Dedup: cleared when next HB arrives
-const unsigned long HB_OFFLINE_TIMEOUT_MS = 75000; // 2.5× the 30 s field-node HB interval
+unsigned long lastHbReceivedAt = 0;      // millis() when last HB was received from field node
+bool powerLossAlertSent = false;          // Dedup: cleared when feedback returns to healthy
+bool nodeOfflineAlertSent = false;        // Dedup: cleared after recovery + re-arm interval
+unsigned long lastOfflineAlertSentAt = 0; // millis() when last offline alert was dispatched
+
+// 5 minutes — matches the PWA ONLINE_TIMEOUT_MS and is generous enough to
+// survive transient RF gaps or the gateway being busy with Supabase calls.
+const unsigned long HB_OFFLINE_TIMEOUT_MS = 5UL * 60UL * 1000UL;  // 5 min
+
+// Minimum time between consecutive "Field Lynk Offline" alerts.
+// Prevents alert storms if the node is flapping (brief drop then HB resets dedup).
+const unsigned long OFFLINE_ALERT_MIN_INTERVAL_MS = 30UL * 60UL * 1000UL;  // 30 min
 
 struct TransmitResult {
   bool isSuccess;
@@ -1041,7 +1049,7 @@ void processHeartbeatIfReady() {
     lastFenceState = normalizedFenceState(hbState);
   }
   lastHbReceivedAt = millis();
-  nodeOfflineAlertSent = false;  // Field node is alive — reset offline alert dedup.
+  nodeOfflineAlertSent = false;  // Field node is alive — re-arm offline alert dedup.
   drawScreen();
 
   // Healthy states clear the power-loss dedup so future faults alert again.
@@ -1245,6 +1253,17 @@ void loop() {
     powerLossAlertSent = true;  // Avoid a second alert when HB resumes with FAILED state.
     Serial.println("Field node heartbeat timeout — marking device offline.");
 
+    // Rate-limit the alert: do not fire again within OFFLINE_ALERT_MIN_INTERVAL_MS
+    // even if the node recovers briefly (resets nodeOfflineAlertSent) then drops again.
+    unsigned long nowMs = millis();
+    bool alertAllowed = (lastOfflineAlertSentAt == 0) ||
+                        ((nowMs - lastOfflineAlertSentAt) >= OFFLINE_ALERT_MIN_INTERVAL_MS);
+    if (!alertAllowed) {
+      Serial.printf("[OFFLINE] Skipping alert — last sent %lu s ago, min interval %lu s.\n",
+        (nowMs - lastOfflineAlertSentAt) / 1000UL,
+        OFFLINE_ALERT_MIN_INTERVAL_MS / 1000UL);
+    }
+
     // Mark the device offline in Supabase and clear contactor feedback to OPEN
     // so the dashboard reflects that the fence is de-energized (relay defaults
     // to open when the field node loses power).
@@ -1299,11 +1318,14 @@ void loop() {
       );
     }
 
-    createAndSendAlert(
-      "critical",
-      "Field Lynk Offline",
-      "The Field Lynk has stopped responding. Please check its power supply and make sure it is within range of the gateway."
-    );
+    if (alertAllowed) {
+      lastOfflineAlertSentAt = millis();
+      createAndSendAlert(
+        "critical",
+        "Field Lynk Offline",
+        "The Field Lynk has stopped responding. Please check its power supply and make sure it is within range of the gateway."
+      );
+    }
   }
 
   if (millis() - lastPollStartedAt >= POLL_INTERVAL_MS) {
