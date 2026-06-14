@@ -361,6 +361,7 @@ bool sendJsonPatch(const String& url, const String& payload, const String& conte
   }
 
   http.begin(url);
+  http.setTimeout(3000);  // Don't block longer than 3 s — keeps OTA window open
   http.setReuse(false);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("apikey", SUPABASE_ANON_KEY);
@@ -467,6 +468,7 @@ bool updateDeviceContactorFeedback(const String& deviceId,
   String fetchUrl = buildApiUrl("devices?id=eq." + deviceId + "&select=metadata");
   HTTPClient http;
   http.begin(fetchUrl);
+  http.setTimeout(3000);
   http.addHeader("apikey", SUPABASE_ANON_KEY);
   http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
   int fetchStatus = http.GET();
@@ -538,6 +540,7 @@ String insertAlert(const String& severity, const String& title, const String& me
   String url = buildApiUrl("alerts");
   HTTPClient http;
   http.begin(url);
+  http.setTimeout(3000);
   http.setReuse(false);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("apikey", SUPABASE_ANON_KEY);
@@ -581,6 +584,7 @@ void callPushEdgeFunction(const String& alertId) {
   String url = String(SUPABASE_URL) + "/functions/v1/send-push-notification";
   HTTPClient http;
   http.begin(url);
+  http.setTimeout(3000);
   http.setReuse(false);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("apikey", SUPABASE_ANON_KEY);
@@ -632,6 +636,7 @@ bool fetchPendingCommands(PendingCommand* commands, size_t maxCommands, size_t& 
 
   HTTPClient http;
   http.begin(url);
+  http.setTimeout(3000);
   http.addHeader("apikey", SUPABASE_ANON_KEY);
   http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
 
@@ -1098,6 +1103,7 @@ void fetchFenceDeviceId() {
 
   HTTPClient http;
   http.begin(url);
+  http.setTimeout(3000);
   http.addHeader("apikey", SUPABASE_ANON_KEY);
   http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
   int statusCode = http.GET();
@@ -1280,6 +1286,7 @@ void loop() {
       String fetchUrl = buildApiUrl("devices?id=eq." + cachedFenceDeviceId + "&select=metadata");
       HTTPClient httpMeta;
       httpMeta.begin(fetchUrl);
+      httpMeta.setTimeout(3000);
       httpMeta.addHeader("apikey", SUPABASE_ANON_KEY);
       httpMeta.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
       int fetchSt = httpMeta.GET();
