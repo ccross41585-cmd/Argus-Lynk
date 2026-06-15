@@ -574,21 +574,21 @@ export function DashboardPage() {
 
     const statusSeen = new Set<string>([command.status])
 
-    const t15 = window.setTimeout(() => {
+    const t8 = window.setTimeout(() => {
       if (!statusSeen.has('gateway_received')) {
         setBanner({ tone: 'warning', message: 'Command queued, but gateway has not picked it up yet.' })
       }
-    }, 15_000)
-    const t30 = window.setTimeout(() => {
+    }, 8_000)
+    const t16 = window.setTimeout(() => {
       if (!statusSeen.has('node_acknowledged')) {
         setBanner({ tone: 'warning', message: 'Gateway did not receive confirmation from Field Lynk.' })
       }
-    }, 30_000)
-    const t45 = window.setTimeout(() => {
+    }, 16_000)
+    const t24 = window.setTimeout(() => {
       if (!statusSeen.has('verified')) {
         setBanner({ tone: 'danger', message: 'Command not physically verified. Please check device status.' })
       }
-    }, 45_000)
+    }, 24_000)
     const tPoll = window.setInterval(async () => {
       if (!supabase) return
       const { data, error } = await supabase
@@ -610,9 +610,9 @@ export function DashboardPage() {
       if (next.status === 'verification_failed' || next.status === 'failed') {
         clearCommandDeliveryTracking()
       }
-    }, 4000)
+    }, 2000)
 
-    commandTimeoutTimersRef.current = [t15, t30, t45, tPoll]
+    commandTimeoutTimersRef.current = [t8, t16, t24, tPoll]
 
     commandStatusUnsubRef.current = subscribeToCommandStatus(command.id, (next) => {
       statusSeen.add(next.status)

@@ -138,10 +138,10 @@ const unsigned long OFFLINE_ALERT_MIN_INTERVAL_MS = 30UL * 60UL * 1000UL;  // 30
 // Post-command physical verification window.
 // After an ACK, the gateway waits up to CONTACT_VERIFY_TIMEOUT_MS for contactor
 // feedback that confirms the physical state matches the issued command.
-const unsigned long CONTACT_VERIFY_GRACE_MS    = 1500;   // min wait before first check (ms)
-const unsigned long CONTACT_VERIFY_TIMEOUT_MS  = 10000;  // max window before failure (ms)
-const unsigned long CONTACT_VERIFY_RETRY_MS    = 3000;   // STATUS retry interval (ms)
-const int           CONTACT_VERIFY_MAX_RETRIES = 2;      // max STATUS retries in window
+const unsigned long CONTACT_VERIFY_GRACE_MS    = 800;    // min wait before first check (ms)
+const unsigned long CONTACT_VERIFY_TIMEOUT_MS  = 8000;   // max window before failure (ms)
+const unsigned long CONTACT_VERIFY_RETRY_MS    = 1500;   // STATUS retry interval (ms)
+const int           CONTACT_VERIFY_MAX_RETRIES = 4;      // max STATUS retries in window
 
 struct TransmitResult {
   bool isSuccess;
@@ -1201,14 +1201,19 @@ void processPendingCommand(const PendingCommand& command) {
     return;
   }
 
-  markCommandLifecycleStatus(command, "verification_failed", "failed_at", "node_no_ack");
-  if (markCommandFailed(command,
-                        "No valid ACK after retry",
-                        "verification_failed",
-                        "node_no_ack")) {
-    rememberCommandId(command.id);
-  }
-  Serial.println("Finished command processing, returning to polling");
+  // ACK may be lost even when the node acted on the command. Do one explicit
+  // verification window with STATUS retries before declaring failure.
+  Serial.println("[VERIFY] No ACK yet — entering verification window for extra checks.");
+  updateDeviceCommandStatus(command.deviceId, "verifying", "pending");
+  pendingVerify.active        = true;
+  pendingVerify.command       = command;
+  pendingVerify.expectedState = expectedState;
+  pendingVerify.lastAuxRaw    = "";
+  pendingVerify.lastFb        = "";
+  pendingVerify.startedAt     = millis();
+  pendingVerify.retries       = 0;
+  radio.startReceive();
+  Serial.println("Entered verification window after missed ACK, returning to polling");
 }
 
 // ── Post-command verification window ─────────────────────────────────────────
