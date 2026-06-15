@@ -858,13 +858,14 @@ a {
   z-index: 20;
   display: grid;
   place-items: center;
-  padding: 20px;
+  padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
   background: rgba(2, 5, 4, 0.68);
   backdrop-filter: blur(14px);
 }
 
 .modal-backdrop--sheet {
   place-items: end center;
+  padding-bottom: calc(96px + env(safe-area-inset-bottom));
 }
 
 .modal-card {
@@ -872,6 +873,9 @@ a {
   display: grid;
   gap: 14px;
   padding: 22px;
+  max-height: min(92dvh, calc(100dvh - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: linear-gradient(180deg, rgba(19, 28, 27, 0.98), rgba(10, 16, 15, 0.96));
   border: 1px solid rgba(151, 181, 132, 0.18);
   border-radius: var(--radius);
@@ -1746,6 +1750,9 @@ details.dev-diagnostics[open] summary .chevron-icon {
 .field-lynk-sheet {
   width: min(680px, calc(100% - 20px));
   margin: auto 10px 14px;
+  max-height: min(86dvh, calc(100dvh - 124px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: linear-gradient(180deg, rgba(20, 28, 27, 0.98), rgba(10, 15, 14, 0.97));
   border: 1px solid var(--line);
   border-radius: 20px;
@@ -2360,6 +2367,9 @@ details.dev-diagnostics[open] summary .chevron-icon {
 .freezer-quick-sheet {
   width: min(760px, calc(100% - 20px));
   margin: auto 10px 14px;
+  max-height: min(86dvh, calc(100dvh - 124px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: linear-gradient(180deg, rgba(16, 24, 34, 0.98), rgba(8, 13, 20, 0.97));
   border: 1px solid var(--line);
   border-radius: 20px;

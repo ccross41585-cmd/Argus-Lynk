@@ -1058,7 +1058,7 @@ export function DashboardPage() {
     ? new Date(String(freezerDevice.metadata.updated)).toLocaleString()
     : (freezerDevice?.last_seen ? new Date(freezerDevice.last_seen).toLocaleString() : 'Unknown')
   const freezerConnectionType = freezerDevice
-    ? String(freezerDevice.metadata.connection_type ?? freezerDevice.metadata.network_type ?? 'LoRa')
+    ? String(freezerDevice.metadata.connection_type ?? freezerDevice.metadata.network_type ?? freezerDevice.metadata.transport ?? 'Unknown')
     : 'Unknown'
   const freezerWarningF = asNumber(freezerDevice?.metadata.warning_high_f) ?? 5
   const freezerAlarmF = asNumber(freezerDevice?.metadata.alarm_high_f) ?? 10
