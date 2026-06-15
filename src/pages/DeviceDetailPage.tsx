@@ -119,9 +119,7 @@ function LocalDeviceDetail({ deviceId }: { deviceId: string }) {
     if (!device) return
     const cmd = await createCommand({ target_device_id: device.id, command_type: command, payload: {}, requested_by: 'home-tablet' })
     setLatestCommand(cmd)
-    const newPower = command === 'FENCE_TURN_ON' ? 'ON' as const : command === 'FENCE_TURN_OFF' ? 'OFF' as const : device.metadata.charger_power === 'ON' ? 'ON' as const : 'OFF' as const
-    setDevice((d) => d ? { ...d, metadata: { ...d.metadata, charger_power: newPower, relay_feedback: newPower } } : d)
-    setBanner(`Fence command sent: ${command}`)
+    setBanner(`Fence command sent: ${command}. Waiting for field verification.`)
   }
 
   async function handleExtendRuntime() {
@@ -587,6 +585,11 @@ export function DeviceDetailPage() {
       return
     }
 
+    if (!navigator.onLine) {
+      setActionError('No phone internet connection. Command was not sent.')
+      return
+    }
+
     const wantsToProceed = window.confirm(
       `Send ${command === 'turn_on' ? 'TURN ON' : 'TURN OFF'} to ${device.name}?`,
     )
@@ -599,16 +602,24 @@ export function DeviceDetailPage() {
     setActionError(null)
     setActionMessage(null)
 
-    const { data, error } = await supabase
+    const clientCommandId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.floor(Math.random() * 100000)}`
+    const insertPromise = supabase
       .from('device_commands')
       .insert({
         device_id: device.id,
         command,
         status: 'pending',
         gateway_id: device.gateway_id,
+        client_command_id: clientCommandId,
       })
       .select('*')
       .single()
+
+    const timeoutPromise = new Promise<{ data: null; error: { message: string } }>((resolve) => {
+      window.setTimeout(() => resolve({ data: null, error: { message: 'Command not sent. Poor connection or server unreachable.' } }), 8000)
+    })
+
+    const { data, error } = await Promise.race([insertPromise, timeoutPromise])
 
     setIsSending(false)
 

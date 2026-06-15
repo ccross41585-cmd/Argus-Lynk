@@ -99,7 +99,8 @@ bool loraOk = false;
 bool wifiConnected = false;  // true once WiFi.status() == WL_CONNECTED
 bool otaEnabled    = false;  // true once ArduinoOTA.begin() succeeds
 bool otaBusy       = false;  // true while a firmware flash is in progress
-#endifString lastPacketText  = "NONE";
+#endif
+String lastPacketText  = "NONE";
 String lastCommandText = "NONE";
 String lastAckText     = "NONE";
 String lastErrorText   = "";
@@ -382,12 +383,16 @@ void sendAck(const String& sequence) {
   }
   String fb  = contactorFeedback();
   String raw = auxRawLabel();
+  String relayState = readRelayOutputState() ? "ON" : "OFF";
   // Physical confirmed_state: "on" if aux contact is closed (AUX_HIGH), "off" otherwise.
   // Independent of commanded state — this is what the gateway uses to verify the command.
   String physState = readAuxDebounced() ? "on" : "off";
-  // Format: ACK|<key>|<node>|<seq>|<ON/OFF>|<fb>|<auxRaw>|<confirmed_state>
+  // Format: ACK|<key>|<node>|<seq>|<cmd_state>|<relay_state>|<aux_raw>|<contactor_feedback>|<confirmed_state>
   String packet = "ACK|" + NETWORK_KEY + "|" + NODE_ID + "|" + sequence
-                  + "|" + (commandedOn ? "ON" : "OFF") + "|" + fb + "|" + raw
+                  + "|" + (commandedOn ? "ON" : "OFF")
+                  + "|" + relayState
+                  + "|" + raw
+                  + "|" + fb
                   + "|" + physState;
   lastAckText = commandedOn ? "ON" : "OFF";
   drawScreen();

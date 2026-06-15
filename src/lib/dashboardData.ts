@@ -480,6 +480,8 @@ export function generateContactorAlerts(
 
   for (const device of devices) {
     if (device.type !== 'fence') continue
+    const ageMs = device.last_seen ? Date.now() - new Date(device.last_seen).getTime() : Infinity
+    if (ageMs >= OFFLINE_TIMEOUT_MS) continue
     const fb = String(device.metadata.contactor_feedback ?? '').toUpperCase()
     if (!isContactorFault(fb as ContactorFault)) continue
 
@@ -592,6 +594,7 @@ export async function getLiveDashboard(): Promise<{
 
 export async function createLiveCommand(
   input: CreateCommandInput,
+  options?: { clientCommandId?: string },
 ): Promise<{ command: CommandRecord | null; error: string | null }> {
   if (!supabase) return { command: null, error: 'Supabase not configured.' }
 
@@ -601,6 +604,7 @@ export async function createLiveCommand(
       device_id: input.target_device_id,
       command:   toGatewayCommand(input.command_type),
       status:    'pending',
+      client_command_id: options?.clientCommandId ?? null,
     })
     .select('*')
     .single()
@@ -613,15 +617,62 @@ export async function createLiveCommand(
     target_device_id: String(row.device_id),
     command_type:     input.command_type,
     payload:          (input.payload ?? {}) as Record<string, string | number | boolean>,
-    status:           'pending',
+    status:           String(row.status ?? 'pending') as CommandRecord['status'],
     requested_by:     input.requested_by ?? 'dashboard',
     created_at:       String(row.created_at),
     sent_at:          null,
-    acknowledged_at:  null,
-    confirmed_at:     null,
-    failure_reason:   null,
+    acknowledged_at:  (row.acknowledged_at as string | null) ?? null,
+    confirmed_at:     (row.confirmed_at as string | null) ?? null,
+    failure_reason:   (row.failure_reason as string | null) ?? null,
   }
   return { command: record, error: null }
+}
+
+export function subscribeToCommandStatus(
+  commandId: string,
+  onUpdate: (command: CommandRecord) => void,
+): () => void {
+  if (!supabase) return () => {}
+
+  const channel = supabase
+    .channel(`device-command-${commandId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'device_commands',
+        filter: `id=eq.${commandId}`,
+      },
+      (payload) => {
+        if (payload.eventType === 'DELETE') return
+        const row = payload.new as Record<string, unknown>
+        const rawCmd = String(row.command ?? row.command_type ?? '').toLowerCase()
+        const mappedType: CommandRecord['command_type'] =
+          rawCmd === 'turn_on' ? 'FENCE_TURN_ON'
+          : rawCmd === 'turn_off' ? 'FENCE_TURN_OFF'
+          : rawCmd === 'fence_turn_on' ? 'FENCE_TURN_ON'
+          : rawCmd === 'fence_turn_off' ? 'FENCE_TURN_OFF'
+          : 'FENCE_TEST_RELAY'
+        const command = {
+          id: String(row.id),
+          target_device_id: String(row.device_id ?? ''),
+          command_type: mappedType,
+          payload: (row.payload as Record<string, string | number | boolean>) ?? {},
+          status: String(row.status ?? 'pending') as CommandRecord['status'],
+          requested_by: 'dashboard',
+          created_at: String(row.created_at ?? new Date().toISOString()),
+          sent_at: (row.sent_at as string | null) ?? null,
+          acknowledged_at: (row.acknowledged_at as string | null) ?? null,
+          confirmed_at: (row.confirmed_at as string | null) ?? null,
+          failure_reason: (row.failure_reason as string | null) ?? null,
+        } satisfies CommandRecord
+        onUpdate(command)
+      },
+    )
+    .subscribe()
+
+  return () => { void supabase!.removeChannel(channel) }
 }
 
 export async function acknowledgeLiveAlert(alertId: string): Promise<void> {

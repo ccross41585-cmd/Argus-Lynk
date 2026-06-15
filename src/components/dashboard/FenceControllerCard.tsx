@@ -28,7 +28,10 @@ export function FenceControllerCard({
   onTurnOff,
   onTestRelay,
 }: FenceControllerCardProps) {
-  const isVerifying = commandStatus === 'verifying' || commandStatus === 'sent'
+  const isVerifying =
+    commandStatus === 'verifying' ||
+    commandStatus === 'sent' ||
+    commandStatus === 'acknowledged'
   return (
     <section className="compact-card" id="fence-line">
       <div className="compact-card__header">

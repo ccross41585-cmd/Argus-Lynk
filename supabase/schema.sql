@@ -44,12 +44,18 @@ create table if not exists public.device_commands (
   tenant_id uuid null,
   device_id uuid not null references public.devices(id) on delete cascade,
   gateway_id text null,
+  client_command_id text null,
   command_type text not null,
   payload jsonb null,
   status text not null default 'pending',
   created_at timestamptz not null default now(),
   sent_at timestamptz null,
+  gateway_received_at timestamptz null,
+  sent_to_node_at timestamptz null,
+  node_acknowledged_at timestamptz null,
   acknowledged_at timestamptz null,
+  verified_at timestamptz null,
+  failed_at timestamptz null,
   confirmed_at timestamptz null,
   failure_reason text null
 );

@@ -40,7 +40,11 @@ export function humanizeToken(value: string | null | undefined) {
 }
 
 export function isPendingStatus(status: string | null | undefined) {
-  return status === 'pending' || status === 'sent'
+  return status === 'pending' ||
+    status === 'sent' ||
+    status === 'gateway_received' ||
+    status === 'sent_to_node' ||
+    status === 'node_acknowledged'
 }
 
 export function maskProjectUrl(url: string) {

@@ -17,7 +17,17 @@ export type DeviceHealthStatus = 'online' | 'offline' | 'warning' | 'critical'
 
 export type AlertSeverity = 'info' | 'warning' | 'critical'
 
-export type CommandStatus = 'pending' | 'sent' | 'acknowledged' | 'confirmed' | 'failed'
+export type CommandStatus =
+  | 'pending'
+  | 'sent'
+  | 'acknowledged'
+  | 'confirmed'
+  | 'failed'
+  | 'gateway_received'
+  | 'sent_to_node'
+  | 'node_acknowledged'
+  | 'verified'
+  | 'verification_failed'
 
 export type WellPumpCommandType =
   | 'WELL_PUMP_SHUTOFF'

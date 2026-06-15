@@ -24,6 +24,7 @@ import {
   getLiveDashboard,
   getLiveDevices,
   silenceLiveAlert,
+  subscribeToCommandStatus,
   subscribeToAlerts,
   subscribeToDevices,
 } from '../lib/dashboardData'
@@ -131,6 +132,9 @@ export function DashboardPage() {
   const [latestCommand, setLatestCommand] = useState<CommandRecord | null>(null)
   const [commandTimeline, setCommandTimeline] = useState<string[]>([])
   const [banner, setBanner] = useState<BannerState | null>(null)
+  const [browserOnline, setBrowserOnline] = useState<boolean>(navigator.onLine)
+  const [networkHint, setNetworkHint] = useState<string | null>(null)
+  const [lastSuccessfulCommandAt, setLastSuccessfulCommandAt] = useState<string | null>(null)
   const [currentTime, setCurrentTime] = useState(() => new Date())
   const [liveWeather, setLiveWeather] = useState<LiveWeather | null>(null)
   const timersRef = useRef<number[]>([])
@@ -138,6 +142,8 @@ export function DashboardPage() {
   const rearmSuppressedRef = useRef(false)
   const rearmCycledRef = useRef(false)
   const rearmTimerRef = useRef<number | null>(null)
+  const commandStatusUnsubRef = useRef<(() => void) | null>(null)
+  const commandTimeoutTimersRef = useRef<number[]>([])
 
   useEffect(() => {
     let isActive = true
@@ -163,6 +169,50 @@ export function DashboardPage() {
   useEffect(() => {
     const id = window.setInterval(() => setCurrentTime(new Date()), 1000)
     return () => window.clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    function updateNetworkState() {
+      setBrowserOnline(navigator.onLine)
+      const conn = (navigator as Navigator & {
+        connection?: { effectiveType?: string; downlink?: number; rtt?: number }
+      }).connection
+
+      if (!navigator.onLine) {
+        setNetworkHint('Offline: phone has no internet connection.')
+        return
+      }
+
+      if (!conn) {
+        setNetworkHint(null)
+        return
+      }
+
+      const effectiveType = String(conn.effectiveType ?? '')
+      const downlink = Number(conn.downlink ?? 0)
+      const rtt = Number(conn.rtt ?? 0)
+
+      if (effectiveType === '2g' || effectiveType === 'slow-2g' || rtt > 1000) {
+        setNetworkHint(`Weak link (${effectiveType || 'unknown'}, rtt ${rtt || 0} ms, ${downlink || 0} Mbps). Command delivery may be delayed.`)
+        return
+      }
+
+      setNetworkHint(null)
+    }
+
+    updateNetworkState()
+    window.addEventListener('online', updateNetworkState)
+    window.addEventListener('offline', updateNetworkState)
+    const conn = (navigator as Navigator & {
+      connection?: { addEventListener?: (name: string, cb: () => void) => void; removeEventListener?: (name: string, cb: () => void) => void }
+    }).connection
+    conn?.addEventListener?.('change', updateNetworkState)
+
+    return () => {
+      window.removeEventListener('online', updateNetworkState)
+      window.removeEventListener('offline', updateNetworkState)
+      conn?.removeEventListener?.('change', updateNetworkState)
+    }
   }, [])
 
   useEffect(() => {
@@ -281,6 +331,8 @@ export function DashboardPage() {
       unsubscribeAlerts()
       if (pollInterval) window.clearInterval(pollInterval)
       timersRef.current.forEach((t) => window.clearTimeout(t))
+      commandStatusUnsubRef.current?.()
+      commandTimeoutTimersRef.current.forEach((t) => window.clearTimeout(t))
       if (rearmTimerRef.current !== null) window.clearTimeout(rearmTimerRef.current)
     }
   }, [])
@@ -384,7 +436,7 @@ export function DashboardPage() {
     })()
     const fenceStatus = (() => {
       const cmdStatus = overview.fenceLine.commandStatus ?? 'idle'
-      if (cmdStatus === 'verifying' || cmdStatus === 'sent') return 'Checking\u2026'
+      if (cmdStatus === 'verifying' || cmdStatus === 'sent' || cmdStatus === 'acknowledged') return 'Checking\u2026'
       if (fenceContactor === 'STUCK ON') return 'Stuck On'
       if (fenceContactor === 'FAILED')   return 'Fault'
       return overview.fenceLine.chargerPower === 'ON' ? 'Secure' : 'Off'
@@ -446,6 +498,106 @@ export function DashboardPage() {
   function clearCommandTimers() {
     timersRef.current.forEach((t) => window.clearTimeout(t))
     timersRef.current = []
+  }
+
+  function clearCommandDeliveryTracking() {
+    commandStatusUnsubRef.current?.()
+    commandStatusUnsubRef.current = null
+    commandTimeoutTimersRef.current.forEach((t) => window.clearTimeout(t))
+    commandTimeoutTimersRef.current = []
+  }
+
+  function lifecycleMessage(status: string, target: 'ON' | 'OFF'): BannerState {
+    if (status === 'pending') return { tone: 'info', message: 'Sending command...' }
+    if (status === 'gateway_received') return { tone: 'info', message: 'Command queued. Waiting for gateway...' }
+    if (status === 'sent_to_node') return { tone: 'info', message: 'Sent to Field Lynk...' }
+    if (status === 'node_acknowledged') return { tone: 'info', message: 'Field Lynk acknowledged...' }
+    if (status === 'verified') return { tone: 'success', message: `${target} confirmed.` }
+    if (status === 'verification_failed') return { tone: 'danger', message: 'Command not physically verified. Please check device status.' }
+    if (status === 'failed') return { tone: 'danger', message: 'Command failed to complete.' }
+    return { tone: 'info', message: 'Sending command...' }
+  }
+
+  function startFenceCommandTracking(command: CommandRecord, target: 'ON' | 'OFF') {
+    clearCommandDeliveryTracking()
+    setLatestCommand(command)
+    setBanner(lifecycleMessage(command.status, target))
+
+    const statusSeen = new Set<string>([command.status])
+
+    const t15 = window.setTimeout(() => {
+      if (!statusSeen.has('gateway_received')) {
+        setBanner({ tone: 'warning', message: 'Command queued, but gateway has not picked it up yet.' })
+      }
+    }, 15_000)
+    const t30 = window.setTimeout(() => {
+      if (!statusSeen.has('node_acknowledged')) {
+        setBanner({ tone: 'warning', message: 'Gateway did not receive confirmation from Field Lynk.' })
+      }
+    }, 30_000)
+    const t45 = window.setTimeout(() => {
+      if (!statusSeen.has('verified')) {
+        setBanner({ tone: 'danger', message: 'Command not physically verified. Please check device status.' })
+      }
+    }, 45_000)
+    const tPoll = window.setInterval(async () => {
+      if (!supabase) return
+      const { data, error } = await supabase
+        .from('device_commands')
+        .select('id, device_id, command, command_type, payload, status, created_at, sent_at, acknowledged_at, confirmed_at, failure_reason')
+        .eq('id', command.id)
+        .maybeSingle()
+      if (error || !data) return
+
+      const row = data as Record<string, unknown>
+      const rawCmd = String(row.command ?? row.command_type ?? '').toLowerCase()
+      const mappedType: CommandRecord['command_type'] =
+        rawCmd === 'turn_on' ? 'FENCE_TURN_ON'
+        : rawCmd === 'turn_off' ? 'FENCE_TURN_OFF'
+        : rawCmd === 'fence_turn_on' ? 'FENCE_TURN_ON'
+        : rawCmd === 'fence_turn_off' ? 'FENCE_TURN_OFF'
+        : 'FENCE_TEST_RELAY'
+
+      const next: CommandRecord = {
+        id: String(row.id),
+        target_device_id: String(row.device_id ?? ''),
+        command_type: mappedType,
+        payload: (row.payload as Record<string, string | number | boolean>) ?? {},
+        status: String(row.status ?? 'pending') as CommandRecord['status'],
+        requested_by: 'dashboard',
+        created_at: String(row.created_at ?? new Date().toISOString()),
+        sent_at: (row.sent_at as string | null) ?? null,
+        acknowledged_at: (row.acknowledged_at as string | null) ?? null,
+        confirmed_at: (row.confirmed_at as string | null) ?? null,
+        failure_reason: (row.failure_reason as string | null) ?? null,
+      }
+
+      statusSeen.add(next.status)
+      setLatestCommand(next)
+      setBanner(lifecycleMessage(next.status, target))
+      if (next.status === 'verified') {
+        setLastSuccessfulCommandAt(new Date().toISOString())
+        clearCommandDeliveryTracking()
+      }
+      if (next.status === 'verification_failed' || next.status === 'failed') {
+        clearCommandDeliveryTracking()
+      }
+    }, 4000)
+
+    commandTimeoutTimersRef.current = [t15, t30, t45, tPoll]
+
+    commandStatusUnsubRef.current = subscribeToCommandStatus(command.id, (next) => {
+      statusSeen.add(next.status)
+      setLatestCommand(next)
+      setBanner(lifecycleMessage(next.status, target))
+      if (next.status === 'verified') {
+        setLastSuccessfulCommandAt(new Date().toISOString())
+        clearCommandDeliveryTracking()
+      }
+      if (next.status === 'verification_failed' || next.status === 'failed') {
+        clearCommandDeliveryTracking()
+      }
+    })
   }
 
   function setWellPumpResolved() {
@@ -528,26 +680,47 @@ export function DashboardPage() {
   }
 
   async function handleFenceOn() {
-    const fence = devices.find((d) => d.type === 'fence')
-    if (!fence) return
-    if (isSupabaseConfigured) {
-      const { error } = await createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'dashboard' })
-      setBanner(error ? { tone: 'danger', message: `Failed to send ON command: ${error}` } : { tone: 'success', message: 'Fence arm command sent.' })
-    } else {
-      await createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'home-tablet' })
-      setBanner({ tone: 'success', message: 'Fence arm command sent.' })
-    }
+    await sendFenceCommand('FENCE_TURN_ON')
   }
 
   async function handleFenceOff() {
+    await sendFenceCommand('FENCE_TURN_OFF')
+  }
+
+  async function sendFenceCommand(commandType: 'FENCE_TURN_ON' | 'FENCE_TURN_OFF') {
     const fence = devices.find((d) => d.type === 'fence')
     if (!fence) return
+
+    const target = commandType === 'FENCE_TURN_ON' ? 'ON' : 'OFF'
+
+    if (!navigator.onLine) {
+      setBanner({ tone: 'danger', message: 'No phone internet connection. Command was not sent.' })
+      return
+    }
+
     if (isSupabaseConfigured) {
-      const { error } = await createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_OFF', payload: {}, requested_by: 'dashboard' })
-      setBanner(error ? { tone: 'danger', message: `Failed to send OFF command: ${error}` } : { tone: 'warning', message: 'Fence disarm command sent.' })
+      const clientCommandId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.floor(Math.random() * 100000)}`)
+      setBanner({ tone: 'info', message: 'Sending command...' })
+
+      const sendPromise = createLiveCommand(
+        { target_device_id: fence.id, command_type: commandType, payload: {}, requested_by: 'dashboard' },
+        { clientCommandId },
+      )
+      const timeoutPromise = new Promise<{ command: CommandRecord | null; error: string | null }>((resolve) => {
+        window.setTimeout(() => resolve({ command: null, error: 'timeout' }), 8000)
+      })
+
+      const { command, error } = await Promise.race([sendPromise, timeoutPromise])
+      if (error || !command) {
+        setBanner({ tone: 'danger', message: 'Command not sent. Poor connection or server unreachable.' })
+        return
+      }
+
+      setBanner({ tone: 'info', message: 'Command queued. Waiting for gateway...' })
+      startFenceCommandTracking(command, target)
     } else {
-      await createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_OFF', payload: {}, requested_by: 'home-tablet' })
-      setBanner({ tone: 'warning', message: 'Fence disarm command sent.' })
+      await createCommand({ target_device_id: fence.id, command_type: commandType, payload: {}, requested_by: 'home-tablet' })
+      setBanner({ tone: 'info', message: `${target} command sent.` })
     }
   }
 
@@ -581,16 +754,7 @@ export function DashboardPage() {
         rearmCycledRef.current = false
       }
       if (msg.type === 'FENCE_REARM') {
-        const fence = devices.find((d) => d.type === 'fence')
-        if (!fence) return
-        void (isSupabaseConfigured
-          ? createLiveCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'dashboard' })
-              .then(({ error }) => setBanner(error
-                ? { tone: 'danger', message: `Rearm failed: ${error}` }
-                : { tone: 'success', message: 'Fence arm command sent.' }))
-          : createCommand({ target_device_id: fence.id, command_type: 'FENCE_TURN_ON', payload: {}, requested_by: 'home-tablet' })
-              .then(() => setBanner({ tone: 'success', message: 'Fence arm command sent.' }))
-        )
+        void sendFenceCommand('FENCE_TURN_ON')
       }
     }
     navigator.serviceWorker.addEventListener('message', onSWMessage)
@@ -617,6 +781,14 @@ export function DashboardPage() {
   }
 
   const nonGatewayDevices = devices.filter((d) => d.type !== 'gateway')
+  const gatewayDevice = devices.find((d) => d.type === 'gateway')
+  const fieldNodeDevice = devices.find((d) => d.type === 'fence')
+  const gatewaySeen = gatewayDevice?.last_seen
+    ? `${new Date(gatewayDevice.last_seen).toLocaleTimeString()} (${getDeviceOnlineStatus(gatewayDevice).label})`
+    : 'Unknown'
+  const fieldSeen = fieldNodeDevice?.last_seen
+    ? `${new Date(fieldNodeDevice.last_seen).toLocaleTimeString()} (${getDeviceOnlineStatus(fieldNodeDevice).label})`
+    : 'Unknown'
 
   return (
     <section className="dashboard-page dashboard-page--home">
@@ -703,6 +875,11 @@ export function DashboardPage() {
                 ? `${latestCommand.command_type} Â· ${latestCommand.status}`
                 : overview.system.lastCommand
             }
+            browserConnection={browserOnline ? 'Online' : 'Offline'}
+            networkHint={networkHint ?? undefined}
+            lastSuccessfulCommand={lastSuccessfulCommandAt ? new Date(lastSuccessfulCommandAt).toLocaleTimeString() : undefined}
+            gatewayLastSeen={gatewaySeen}
+            fieldNodeLastSeen={fieldSeen}
             onSilenceAlerts={() => void handleSilenceAlert()}
             onViewSystemHealth={() => void navigate('/system')}
           />

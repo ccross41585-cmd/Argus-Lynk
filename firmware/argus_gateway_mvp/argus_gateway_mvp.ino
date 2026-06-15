@@ -110,6 +110,7 @@ struct AckPacket {
   bool isValid;
   String sequence;
   String confirmedState;
+  String relayState;
   String contactorFeedback;
   String auxRaw;         // AUX_LOW or AUX_HIGH as reported by field node GPIO34
   String physicalState;  // "on"/"off" — physical confirmed state from aux (field node >= 1.1.1)
@@ -124,6 +125,7 @@ unsigned long lastHbReceivedAt = 0;      // millis() when last HB was received f
 bool powerLossAlertSent = false;          // Dedup: cleared when feedback returns to healthy
 bool nodeOfflineAlertSent = false;        // Dedup: cleared after recovery + re-arm interval
 unsigned long lastOfflineAlertSentAt = 0; // millis() when last offline alert was dispatched
+String lastVerificationAlertCommandId = ""; // Dedup verification failure alerts per command
 
 // 5 minutes — matches the PWA ONLINE_TIMEOUT_MS and is generous enough to
 // survive transient RF gaps or the gateway being busy with Supabase calls.
@@ -420,30 +422,82 @@ bool sendJsonPatch(const String& url, const String& payload, const String& conte
   return true;
 }
 
+bool updateDeviceCommandStatus(const String& deviceId,
+                               const String& commandStatus,
+                               const String& lastCommandResult = "",
+                               const String& commandVerifiedAt = "",
+                               const String& commandFailedAt = "") {
+  if (deviceId.length() == 0 || commandStatus.length() == 0) {
+    return false;
+  }
+
+  String fetchUrl = buildApiUrl("devices?id=eq." + deviceId + "&select=metadata");
+  HTTPClient http;
+  http.begin(fetchUrl);
+  http.setTimeout(3000);
+  http.addHeader("apikey", SUPABASE_ANON_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
+  int fetchStatus = http.GET();
+  String fetchPayload = http.getString();
+  http.end();
+
+  DynamicJsonDocument merged(1024);
+  if (fetchStatus >= 200 && fetchStatus < 300) {
+    DynamicJsonDocument fetched(1024);
+    if (!deserializeJson(fetched, fetchPayload) && fetched.is<JsonArray>() && fetched[0]["metadata"].is<JsonObject>()) {
+      merged.set(fetched[0]["metadata"].as<JsonObject>());
+    }
+  }
+
+  merged["command_status"] = commandStatus;
+  if (lastCommandResult.length() > 0) {
+    merged["last_command_result"] = lastCommandResult;
+  }
+  if (commandVerifiedAt.length() > 0) {
+    merged["command_verified_at"] = commandVerifiedAt;
+  }
+  if (commandFailedAt.length() > 0) {
+    merged["command_failed_at"] = commandFailedAt;
+  }
+
+  DynamicJsonDocument patchBody(1024);
+  patchBody["metadata"] = merged;
+  String patchPayload;
+  serializeJson(patchBody, patchPayload);
+  return sendJsonPatch(buildApiUrl("devices?id=eq." + deviceId), patchPayload, "PATCH devices command status");
+}
+
 bool markCommandSent(const PendingCommand& command) {
   DynamicJsonDocument body(256);
-  body["status"] = "sent";
+  body["status"] = "gateway_received";
   body["gateway_id"] = GATEWAY_ID;
 
   String sentAt = timestampNow();
   if (sentAt.length() > 0) {
     body["sent_at"] = sentAt;
+    body["gateway_received_at"] = sentAt;
   }
 
   String url = buildApiUrl("device_commands?id=eq." + command.id);
   String payload;
   serializeJson(body, payload);
-  return sendJsonPatch(url, payload, "PATCH device_commands sent");
+  if (!sendJsonPatch(url, payload, "PATCH device_commands sent")) {
+    return false;
+  }
+
+  updateDeviceCommandStatus(command.deviceId, "sent", "pending");
+  return true;
 }
 
 bool markCommandAcknowledged(const PendingCommand& command, const String& confirmedState) {
   DynamicJsonDocument body(256);
-  body["status"] = "acknowledged";
+  body["status"] = "node_acknowledged";
   body["error_message"] = nullptr;
 
   String acknowledgedAt = timestampNow();
   if (acknowledgedAt.length() > 0) {
     body["acknowledged_at"] = acknowledgedAt;
+    body["node_acknowledged_at"] = acknowledgedAt;
   }
 
   String url = buildApiUrl("device_commands?id=eq." + command.id);
@@ -455,6 +509,7 @@ bool markCommandAcknowledged(const PendingCommand& command, const String& confir
 
   DynamicJsonDocument deviceBody(512);
   deviceBody["confirmed_state"] = confirmedState;
+  deviceBody["desired_state"] = confirmedState;
   deviceBody["online"] = true;
   deviceBody["status"] = "online";
 
@@ -473,6 +528,8 @@ bool markCommandAcknowledged(const PendingCommand& command, const String& confir
   if (!sendJsonPatch(deviceUrl, devicePayload, "PATCH devices after ACK")) {
     return false;
   }
+
+  updateDeviceCommandStatus(command.deviceId, "acknowledged", "pending");
 
   Serial.print("Device state updated: ");
   Serial.println(confirmedState);
@@ -651,10 +708,21 @@ void createAndSendAlert(const String& severity, const String& title, const Strin
   callPushEdgeFunction(alertId);
 }
 
-bool markCommandFailed(const PendingCommand& command, const String& errorMessage) {
+bool markCommandFailed(const PendingCommand& command,
+                       const String& errorMessage,
+                       const String& status = "failed",
+                       const String& failureReason = "") {
   DynamicJsonDocument body(256);
-  body["status"] = "failed";
+  body["status"] = status;
   body["error_message"] = errorMessage;
+  if (failureReason.length() > 0) {
+    body["failure_reason"] = failureReason;
+  }
+
+  String nowTs = timestampNow();
+  if (status == "verification_failed" && nowTs.length() > 0) {
+    body["failed_at"] = nowTs;
+  }
 
   String url = buildApiUrl("device_commands?id=eq." + command.id);
   String payload;
@@ -665,6 +733,28 @@ bool markCommandFailed(const PendingCommand& command, const String& errorMessage
   supabaseOk = false;
   drawScreen();
   return sendJsonPatch(url, payload, "PATCH device_commands failed");
+}
+
+bool markCommandLifecycleStatus(const PendingCommand& command,
+                                const String& status,
+                                const String& timestampField = "",
+                                const String& failureReason = "") {
+  DynamicJsonDocument body(512);
+  body["status"] = status;
+
+  String nowTs = timestampNow();
+  if (timestampField.length() > 0 && nowTs.length() > 0) {
+    body[timestampField] = nowTs;
+  }
+
+  if (failureReason.length() > 0) {
+    body["failure_reason"] = failureReason;
+  }
+
+  String url = buildApiUrl("device_commands?id=eq." + command.id);
+  String payload;
+  serializeJson(body, payload);
+  return sendJsonPatch(url, payload, "PATCH device_commands lifecycle status");
 }
 
 bool fetchPendingCommands(PendingCommand* commands, size_t maxCommands, size_t& commandCount) {
@@ -820,7 +910,7 @@ TransmitResult sendCommandPacket(String packet) {
 }
 
 AckPacket waitForAck(const PendingCommand& command) {
-  AckPacket ack = {false, "", ""};
+  AckPacket ack = {false, "", "", "", "", "", ""};
   unsigned long waitStartedAt = millis();
   receivedFlag = false;
 
@@ -868,10 +958,11 @@ AckPacket waitForAck(const PendingCommand& command) {
     String packetKey = packetPart(packet, 1);
     String packetNode = packetPart(packet, 2);
     String packetSequence = packetPart(packet, 3);
-    String packetAction = packetPart(packet, 4);
-    String packetContactorFeedback = packetPart(packet, 5);
+    String packetAction            = packetPart(packet, 4);
+    String packetRelayState        = packetPart(packet, 5);  // ON/OFF output pin state
     String packetAuxRaw            = packetPart(packet, 6);  // AUX_LOW or AUX_HIGH
-    String packetPhysicalState     = packetPart(packet, 7);  // "on"/"off" (field node >= 1.1.1)
+    String packetContactorFeedback = packetPart(packet, 7);
+    String packetPhysicalState     = packetPart(packet, 8);  // "on"/"off" (field node >= 1.1.1)
 
     if (packetType != "ACK") {
       logVerbose("ACK ignored because type is not ACK.");
@@ -897,7 +988,9 @@ AckPacket waitForAck(const PendingCommand& command) {
       continue;
     }
 
-    ack.confirmedState = legacyActionToConfirmedState(packetAction);
+    ack.confirmedState = (packetPhysicalState == "on" || packetPhysicalState == "off")
+      ? packetPhysicalState
+      : legacyActionToConfirmedState(packetAction);
     if (ack.confirmedState.length() == 0) {
       logVerbose("ACK ignored because state token is not ON or OFF.");
       radio.startReceive();
@@ -906,6 +999,7 @@ AckPacket waitForAck(const PendingCommand& command) {
 
     ack.isValid = true;
     ack.sequence = packetSequence;
+    ack.relayState = packetRelayState;
     ack.contactorFeedback = packetContactorFeedback;
     ack.auxRaw = packetAuxRaw;
     ack.physicalState = packetPhysicalState;
@@ -981,7 +1075,7 @@ void processPendingCommand(const PendingCommand& command) {
     Serial.println(packet);
   }
 
-  AckPacket ack = {false, "", ""};
+  AckPacket ack = {false, "", "", "", "", "", ""};
   for (int attempt = 0; attempt < 2; attempt++) {
     TransmitResult transmitResult = sendCommandPacket(packet);
     if (!transmitResult.isSuccess) {
@@ -997,6 +1091,7 @@ void processPendingCommand(const PendingCommand& command) {
     Serial.print(legacyAction);
     Serial.print(" id=");
     Serial.println(shortCommandId(command.id));
+    markCommandLifecycleStatus(command, "sent_to_node", "sent_to_node_at");
 
     logVerbose("Starting ACK wait...");
     ack = waitForAck(command);
@@ -1024,6 +1119,7 @@ void processPendingCommand(const PendingCommand& command) {
   }
 
   if (ack.isValid) {
+    markCommandLifecycleStatus(command, "node_acknowledged", "node_acknowledged_at");
     Serial.printf("[ACK] node=%s state=%s aux=%s fb=%s\n",
       NODE_ID.c_str(), ack.confirmedState.c_str(), ack.auxRaw.c_str(), ack.contactorFeedback.c_str());
     Serial.printf("[VERIFY] checking desired=%s actual=%s fb=%s\n",
@@ -1033,8 +1129,10 @@ void processPendingCommand(const PendingCommand& command) {
       Serial.println("[VERIFY] success");
       String nowTs = timestampNow();
       if (markCommandAcknowledged(command, ack.confirmedState)) {
+        markCommandLifecycleStatus(command, "verified", "verified_at");
         updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
                                       "", false, "verified", "verified", nowTs);
+        updateDeviceCommandStatus(command.deviceId, "verified", "verified", nowTs);
         rememberCommandId(command.id);
       }
       Serial.println("Finished command processing, returning to polling");
@@ -1044,13 +1142,21 @@ void processPendingCommand(const PendingCommand& command) {
     if (isCommandDefinitelyFailed(expectedState, ack.contactorFeedback)) {
       Serial.printf("[VERIFY] failed (fb=%s)\n", ack.contactorFeedback.c_str());
       String nowTs = timestampNow();
+      markCommandLifecycleStatus(command, "verification_failed", "failed_at", "aux_feedback_mismatch");
       updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
                                     "", false, "verification_failed", "verification_failed", nowTs);
-      if (markCommandFailed(command, "Physical feedback did not match: " + ack.contactorFeedback)) {
+      updateDeviceCommandStatus(command.deviceId, "verification_failed", "verification_failed", "", nowTs);
+      if (markCommandFailed(command,
+                            "Physical feedback did not match: " + ack.contactorFeedback,
+                            "verification_failed",
+                            "aux_feedback_mismatch")) {
         rememberCommandId(command.id);
       }
-      createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
-        "Field Lynk command was sent but physical feedback did not match. Check the fence controller.");
+      if (lastVerificationAlertCommandId != command.id) {
+        lastVerificationAlertCommandId = command.id;
+        createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
+          "Field Lynk command was sent but physical feedback did not match. Check the fence controller.");
+      }
       Serial.println("Finished command processing, returning to polling");
       return;
     }
@@ -1059,6 +1165,7 @@ void processPendingCommand(const PendingCommand& command) {
     Serial.printf("[VERIFY] retry 1 — entering verification window (fb=%s)\n", ack.contactorFeedback.c_str());
     updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
                                   "", false, "verifying", "pending", "");
+    updateDeviceCommandStatus(command.deviceId, "verifying", "pending");
     pendingVerify.active        = true;
     pendingVerify.command       = command;
     pendingVerify.expectedState = expectedState;
@@ -1072,7 +1179,11 @@ void processPendingCommand(const PendingCommand& command) {
     return;
   }
 
-  if (markCommandFailed(command, "No valid ACK after retry")) {
+  markCommandLifecycleStatus(command, "verification_failed", "failed_at", "node_no_ack");
+  if (markCommandFailed(command,
+                        "No valid ACK after retry",
+                        "verification_failed",
+                        "node_no_ack")) {
     rememberCommandId(command.id);
   }
   Serial.println("Finished command processing, returning to polling");
@@ -1133,8 +1244,10 @@ void checkVerificationWindow() {
           String confirmedState = (pendingVerify.expectedState == "on") ? "on" : "off";
           String nowTs = timestampNow();
           markCommandAcknowledged(pendingVerify.command, confirmedState);
+          markCommandLifecycleStatus(pendingVerify.command, "verified", "verified_at");
           updateDeviceContactorFeedback(pendingVerify.command.deviceId, pFb, pAux,
                                         "", false, "verified", "verified", nowTs);
+          updateDeviceCommandStatus(pendingVerify.command.deviceId, "verified", "verified", nowTs);
           rememberCommandId(pendingVerify.command.id);
           lastFenceState = normalizedFenceState(confirmedState);
           pendingVerify.active = false;
@@ -1146,12 +1259,19 @@ void checkVerificationWindow() {
         if (isCommandDefinitelyFailed(pendingVerify.expectedState, pFb)) {
           Serial.printf("[VERIFY] failed after window (fb=%s)\n", pFb.c_str());
           String nowTs = timestampNow();
+          markCommandLifecycleStatus(pendingVerify.command, "verification_failed", "failed_at", "aux_feedback_mismatch");
           updateDeviceContactorFeedback(pendingVerify.command.deviceId, pFb, pAux,
                                         "", false, "verification_failed", "verification_failed", nowTs);
+          updateDeviceCommandStatus(pendingVerify.command.deviceId, "verification_failed", "verification_failed", "", nowTs);
           markCommandFailed(pendingVerify.command,
-            "Physical feedback did not match after verification window: " + pFb);
-          createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
-            "Field Lynk command was sent but physical feedback did not match. Check the fence controller.");
+            "Physical feedback did not match after verification window: " + pFb,
+            "verification_failed",
+            "aux_feedback_mismatch");
+          if (lastVerificationAlertCommandId != pendingVerify.command.id) {
+            lastVerificationAlertCommandId = pendingVerify.command.id;
+            createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
+              "Field Lynk command was sent but physical feedback did not match. Check the fence controller.");
+          }
           rememberCommandId(pendingVerify.command.id);
           pendingVerify.active = false;
           radio.startReceive();
@@ -1167,12 +1287,26 @@ void checkVerificationWindow() {
     Serial.printf("[VERIFY] failed after timeout (elapsed=%lu ms, last_fb=%s)\n",
       elapsedMs, pendingVerify.lastFb.c_str());
     String nowTs = timestampNow();
+    markCommandLifecycleStatus(pendingVerify.command, "verification_failed", "failed_at", "gateway_timeout");
     updateDeviceContactorFeedback(pendingVerify.command.deviceId,
                                   pendingVerify.lastFb, pendingVerify.lastAuxRaw,
                                   "", false, "verification_failed", "verification_failed", nowTs);
-    markCommandFailed(pendingVerify.command, "Verification timeout — no physical confirmation received");
-    createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
-      "Field Lynk command was sent but physical feedback did not match. Check the fence controller.");
+    updateDeviceCommandStatus(pendingVerify.command.deviceId, "verification_failed", "verification_failed", "", nowTs);
+    markCommandFailed(pendingVerify.command,
+      "Verification timeout — no physical confirmation received",
+      "verification_failed",
+      "gateway_timeout");
+    bool nodeLooksOffline = (lastHbReceivedAt == 0) || ((millis() - lastHbReceivedAt) > HB_OFFLINE_TIMEOUT_MS);
+    if (lastVerificationAlertCommandId != pendingVerify.command.id) {
+      lastVerificationAlertCommandId = pendingVerify.command.id;
+      if (nodeLooksOffline) {
+        createAndSendAlert("critical", "Field Lynk Connection Issue",
+          "Field Lynk command could not be verified because the node appears offline or stale.");
+      } else {
+        createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
+          "Field Lynk command was sent but physical feedback did not match. Check the fence controller.");
+      }
+    }
     rememberCommandId(pendingVerify.command.id);
     pendingVerify.active = false;
     radio.startReceive();
@@ -1273,7 +1407,7 @@ void processHeartbeatIfReady() {
   }
 
   // Fence commanded ON but contactor did not engage — likely power supply failure.
-  if (hbFb == "FAILED" && !powerLossAlertSent) {
+  if (hbFb == "FAILED" && !powerLossAlertSent && !pendingVerify.active) {
     powerLossAlertSent = true;
     createAndSendAlert(
       "critical",
@@ -1283,7 +1417,7 @@ void processHeartbeatIfReady() {
   }
 
   // Contactor stuck on after OFF command.
-  if (hbFb == "STUCK_ON" && !powerLossAlertSent) {
+  if (hbFb == "STUCK_ON" && !powerLossAlertSent && !pendingVerify.active) {
     powerLossAlertSent = true;
     createAndSendAlert(
       "warning",
