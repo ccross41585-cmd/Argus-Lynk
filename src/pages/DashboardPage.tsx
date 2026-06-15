@@ -383,6 +383,8 @@ export function DashboardPage() {
       return 'neutral'
     })()
     const fenceStatus = (() => {
+      const cmdStatus = overview.fenceLine.commandStatus ?? 'idle'
+      if (cmdStatus === 'verifying' || cmdStatus === 'sent') return 'Checking\u2026'
       if (fenceContactor === 'STUCK ON') return 'Stuck On'
       if (fenceContactor === 'FAILED')   return 'Fault'
       return overview.fenceLine.chargerPower === 'ON' ? 'Secure' : 'Off'

@@ -373,16 +373,27 @@ void sendHeartbeat() {
 }
 
 void sendAck(const String& sequence) {
+  // Wait out any remaining contactor grace period so feedback is definitive (never "CHECKING").
+  unsigned long msSinceCmd = millis() - lastCommandChangeMs;
+  if (msSinceCmd < CONTACTOR_GRACE_MS) {
+    unsigned long waitMs = CONTACTOR_GRACE_MS - msSinceCmd;
+    Serial.printf("[ACK] Grace wait %lu ms before reading feedback.\n", waitMs);
+    delay(waitMs);
+  }
   String fb  = contactorFeedback();
   String raw = auxRawLabel();
-  // Format: ACK|<key>|<node>|<seq>|<ON/OFF>|<CONFIRMED/FAILED/OPEN/STUCK_ON>|<AUX_LOW/AUX_HIGH>
+  // Physical confirmed_state: "on" if aux contact is closed (AUX_HIGH), "off" otherwise.
+  // Independent of commanded state — this is what the gateway uses to verify the command.
+  String physState = readAuxDebounced() ? "on" : "off";
+  // Format: ACK|<key>|<node>|<seq>|<ON/OFF>|<fb>|<auxRaw>|<confirmed_state>
   String packet = "ACK|" + NETWORK_KEY + "|" + NODE_ID + "|" + sequence
-                  + "|" + (commandedOn ? "ON" : "OFF") + "|" + fb + "|" + raw;
+                  + "|" + (commandedOn ? "ON" : "OFF") + "|" + fb + "|" + raw
+                  + "|" + physState;
   lastAckText = commandedOn ? "ON" : "OFF";
   drawScreen();
 
   Serial.print("Sending ACK: ");
-  Serial.println(packet);  
+  Serial.println(packet);
   Serial.print("AUX_RAW=");
   Serial.println(raw);
 
@@ -509,12 +520,8 @@ void handleCommandPacket(const String& packet) {
   lastErrorText   = "";
   drawScreen();
 
-  Serial.print("Handled command ");
-  Serial.print(command);
-  Serial.print(". Commanded: ");
-  Serial.print(commandedOn ? "ON" : "OFF");
-  Serial.print(". Contactor: ");
-  Serial.println(contactorFeedback());
+  Serial.printf("[CMD] Received %s id=%s commanded=%s\n",
+    command.c_str(), sequence.c_str(), commandedOn ? "ON" : "OFF");
 
   sendAck(sequence);
 }

@@ -39,6 +39,7 @@ export interface DashboardOverview {
     feedback: 'Contactor confirmed ON' | 'Contactor confirmed OFF' | 'Awaiting confirmation'
     verificationNote: string
     auxRaw: string   // 'AUX_LOW' | 'AUX_HIGH' | '' (empty = not yet received)
+    commandStatus: string  // 'idle' | 'verifying' | 'verified' | 'verification_failed'
   }
   wellPump: {
     pumpPower: 'ON' | 'OFF'

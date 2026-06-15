@@ -8,6 +8,7 @@ type FenceControllerCardProps = {
   feedback: string
   note: string
   auxRaw?: string
+  commandStatus?: string
   latestCommand: CommandRecord | null
   onTurnOn: () => void
   onTurnOff: () => void
@@ -21,11 +22,13 @@ export function FenceControllerCard({
   feedback,
   note,
   auxRaw,
+  commandStatus,
   latestCommand,
   onTurnOn,
   onTurnOff,
   onTestRelay,
 }: FenceControllerCardProps) {
+  const isVerifying = commandStatus === 'verifying' || commandStatus === 'sent'
   return (
     <section className="compact-card" id="fence-line">
       <div className="compact-card__header">
@@ -70,6 +73,12 @@ export function FenceControllerCard({
             <strong className="value-danger">Not received</strong>
           )}
         </div>
+        {isVerifying && (
+          <div className="data-row">
+            <span className="label">Command Status</span>
+            <strong className="value-muted">Checking…</strong>
+          </div>
+        )}
       </div>
 
       <p className="inline-note">{note}</p>

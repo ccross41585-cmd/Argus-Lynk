@@ -227,6 +227,7 @@ function fenceMeta(row: Device): Record<string, string | number | boolean | null
     relay_feedback:      confirmed || '—',
     last_command:        desired   || '—',
     contactor_feedback:  contactorFeedback,
+    command_status:      (base.command_status as string | null) ?? 'idle',
     rssi:                row.rssi ?? null,
   }
 }
@@ -421,6 +422,7 @@ export function buildOverview(devices: DashboardDevice[]): DashboardOverview {
       feedback:         fenceFeedback,
       verificationNote: fenceVerificationNote,
       auxRaw:           fenceAuxRaw,
+      commandStatus:    String(fence?.metadata.command_status ?? 'idle'),
     },
     // Placeholder stubs — replaced when those devices are installed
     wellPump: {
@@ -480,6 +482,11 @@ export function generateContactorAlerts(
     if (device.type !== 'fence') continue
     const fb = String(device.metadata.contactor_feedback ?? '').toUpperCase()
     if (!isContactorFault(fb as ContactorFault)) continue
+
+    // Suppress fault alerts while a command is being verified — physical state
+    // may not have settled yet and a false alert would be confusing.
+    const cmdStatus = String(device.metadata.command_status ?? 'idle')
+    if (cmdStatus === 'verifying' || cmdStatus === 'sent' || cmdStatus === 'acknowledged') continue
 
     const alertType = fb === 'STUCK_ON' ? 'fence_contactor_stuck_on' : 'fence_contactor_failed'
 

@@ -31,6 +31,7 @@ const overview: DashboardOverview = {
     feedback: 'Contactor confirmed ON',
     verificationNote: 'Fence charge verification requires inline voltage sensing.',
     auxRaw: '',
+    commandStatus: 'idle',
   },
   wellPump: {
     pumpPower: 'ON',
