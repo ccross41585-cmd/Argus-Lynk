@@ -34,16 +34,24 @@ type StatusCardProps = {
   tone: DashboardTone
   /** Override the default icon with any Lucide icon component */
   customIcon?: LucideIcon
-  /** If provided, ON/OFF control buttons are rendered on the card */
-  onToggleOn?: () => void
-  onToggleOff?: () => void
+  onClick?: () => void
 }
 
-export function StatusCard({ icon, label, status, detail, tone, customIcon, onToggleOn, onToggleOff }: StatusCardProps) {
+export function StatusCard({ icon, label, status, detail, tone, customIcon, onClick }: StatusCardProps) {
   const Icon = customIcon ?? ICON_MAP[icon]
-  const hasControls = !!(onToggleOn || onToggleOff)
   return (
-    <article className={`status-card status-card--${tone}${hasControls ? ' status-card--controllable' : ''}`}>
+    <article
+      className={`status-card status-card--${tone}${onClick ? ' status-card--interactive' : ''}`}
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onClick()
+        }
+      } : undefined}
+    >
       <div className="status-card__main">
         <span className={`status-card__icon status-card__icon--${tone}`} aria-hidden="true">
           <Icon size={26} strokeWidth={1.6} />
@@ -54,20 +62,6 @@ export function StatusCard({ icon, label, status, detail, tone, customIcon, onTo
           <p className="status-card__detail">{detail}</p>
         </div>
       </div>
-      {hasControls && (
-        <div className="status-card__toggle-row">
-          {onToggleOn && (
-            <button type="button" className="status-card__btn status-card__btn--on" onClick={onToggleOn}>
-              ON
-            </button>
-          )}
-          {onToggleOff && (
-            <button type="button" className="status-card__btn status-card__btn--off" onClick={onToggleOff}>
-              OFF
-            </button>
-          )}
-        </div>
-      )}
     </article>
   )
 }

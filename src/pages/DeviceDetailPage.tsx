@@ -32,6 +32,8 @@ type FreezerLogPoint = {
   created_at: string
 }
 
+type FreezerRange = '24h' | '7d' | '30d' | 'custom'
+
 type FreezerSettings = {
   temp_alarm_high_f: number
   temp_warning_high_f: number
@@ -74,19 +76,6 @@ function getMissingDevicesColumn(message: string | undefined): string | null {
 function isFreezerType(type: string | null | undefined) {
   const normalized = String(type ?? '').toLowerCase()
   return normalized === 'freezer_lynk' || normalized === 'freezer_alarm' || normalized === 'freezer'
-}
-
-function linePath(points: number[], width = 300, height = 90): string {
-  if (points.length < 2) return ''
-  const min = Math.min(...points)
-  const max = Math.max(...points)
-  const span = Math.max(max - min, 0.0001)
-  const step = width / (points.length - 1)
-  return points.map((p, i) => {
-    const x = i * step
-    const y = height - ((p - min) / span) * (height - 4) - 2
-    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
-  }).join(' ')
 }
 
 const mockShutoffWillConfirm = true
@@ -312,8 +301,10 @@ export function DeviceDetailPage() {
   const [latestCommand, setLatestCommand] = useState<DeviceCommand | null>(null)
   const [events, setEvents] = useState<DeviceEvent[]>([])
   const [alertHistory, setAlertHistory] = useState<Array<Record<string, unknown>>>([])
-  const [freezerHistory24h, setFreezerHistory24h] = useState<FreezerLogPoint[]>([])
-  const [freezerHistory7d, setFreezerHistory7d] = useState<FreezerLogPoint[]>([])
+  const [freezerHistory30d, setFreezerHistory30d] = useState<FreezerLogPoint[]>([])
+  const [freezerRange, setFreezerRange] = useState<FreezerRange>('24h')
+  const [customRangeStart, setCustomRangeStart] = useState('')
+  const [customRangeEnd, setCustomRangeEnd] = useState('')
   const [freezerSettings, setFreezerSettings] = useState<FreezerSettings | null>(null)
   const [isSavingFreezerSettings, setIsSavingFreezerSettings] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
@@ -432,15 +423,14 @@ export function DeviceDetailPage() {
       setAlertHistory((alertsResponse.data ?? []) as Array<Record<string, unknown>>)
 
       if (isFreezerType(loadedDevice.type)) {
-        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
 
         const [historyRes, settingsRes] = await Promise.all([
           client
             .from('freezer_temperature_logs')
             .select('temperature_f, created_at')
             .eq('device_id', loadedDevice.id)
-            .gte('created_at', sevenDaysAgo)
+            .gte('created_at', thirtyDaysAgo)
             .order('created_at', { ascending: true })
             .limit(3000),
           client
@@ -452,16 +442,14 @@ export function DeviceDetailPage() {
 
         if (!historyRes.error && historyRes.data) {
           const points = historyRes.data as FreezerLogPoint[]
-          setFreezerHistory7d(points)
-          setFreezerHistory24h(points.filter((p) => p.created_at >= oneDayAgo))
+          setFreezerHistory30d(points)
         }
 
         if (!settingsRes.error && settingsRes.data) {
           setFreezerSettings(settingsRes.data as FreezerSettings)
         }
       } else {
-        setFreezerHistory24h([])
-        setFreezerHistory7d([])
+        setFreezerHistory30d([])
         setFreezerSettings(null)
       }
 
@@ -637,11 +625,84 @@ export function DeviceDetailPage() {
     () => (device ? getDeviceOnlineStatus(device) : null),
     [device],
   )
-  const freezerCurrentTemp = freezerHistory24h.length > 0
-    ? freezerHistory24h[freezerHistory24h.length - 1].temperature_f
+  const freezerCurrentTemp = freezerHistory30d.length > 0
+    ? freezerHistory30d[freezerHistory30d.length - 1].temperature_f
     : null
-  const freezer24hPath = linePath(freezerHistory24h.map((p) => p.temperature_f))
-  const freezer7dPath = linePath(freezerHistory7d.map((p) => p.temperature_f))
+
+  const freezerRangePoints = useMemo(() => {
+    const now = Date.now()
+    if (freezerRange === '24h') {
+      const cutoff = now - 24 * 60 * 60 * 1000
+      return freezerHistory30d.filter((p) => new Date(p.created_at).getTime() >= cutoff)
+    }
+    if (freezerRange === '7d') {
+      const cutoff = now - 7 * 24 * 60 * 60 * 1000
+      return freezerHistory30d.filter((p) => new Date(p.created_at).getTime() >= cutoff)
+    }
+    if (freezerRange === 'custom') {
+      const start = customRangeStart ? new Date(customRangeStart).getTime() : Number.NEGATIVE_INFINITY
+      const end = customRangeEnd ? new Date(customRangeEnd).getTime() + (24 * 60 * 60 * 1000) : Number.POSITIVE_INFINITY
+      return freezerHistory30d.filter((p) => {
+        const t = new Date(p.created_at).getTime()
+        return t >= start && t <= end
+      })
+    }
+    return freezerHistory30d
+  }, [freezerHistory30d, freezerRange, customRangeStart, customRangeEnd])
+
+  const freezerChart = useMemo(() => {
+    const width = 640
+    const height = 220
+    const points = freezerRangePoints
+    const temps = points.map((p) => p.temperature_f)
+    const warning = freezerSettings?.temp_warning_high_f ?? null
+    const alarm = freezerSettings?.temp_alarm_high_f ?? null
+
+    if (temps.length === 0) {
+      return { width, height, path: '', minY: 0, maxY: 0, yTicks: [] as number[], markers: [] as Array<{ x: number; y: number; ts: string; temp: number }> }
+    }
+
+    let minY = Math.min(...temps)
+    let maxY = Math.max(...temps)
+    if (warning !== null) maxY = Math.max(maxY, warning)
+    if (alarm !== null) maxY = Math.max(maxY, alarm)
+    const span = Math.max(maxY - minY, 2)
+    const pad = Math.max(span * 0.18, 1)
+    minY -= pad
+    maxY += pad
+
+    const toX = (idx: number) => (points.length <= 1 ? 0 : (idx / (points.length - 1)) * width)
+    const toY = (temp: number) => height - ((temp - minY) / Math.max(maxY - minY, 0.001)) * height
+
+    const path = points.map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${toX(idx).toFixed(2)} ${toY(p.temperature_f).toFixed(2)}`).join(' ')
+
+    const yTicks = Array.from({ length: 5 }, (_, i) => {
+      const ratio = i / 4
+      return maxY - ratio * (maxY - minY)
+    })
+
+    const markerIndexes = Array.from(new Set([0, Math.floor((points.length - 1) / 2), Math.max(points.length - 1, 0)]))
+    const markers = markerIndexes.map((idx) => {
+      const point = points[idx]
+      return {
+        x: toX(idx),
+        y: toY(point.temperature_f),
+        ts: point.created_at,
+        temp: point.temperature_f,
+      }
+    })
+
+    return { width, height, path, minY, maxY, yTicks, markers }
+  }, [freezerRangePoints, freezerSettings])
+
+  const freezerStats = useMemo(() => {
+    if (freezerRangePoints.length === 0) return { high: null, low: null, avg: null }
+    const temps = freezerRangePoints.map((p) => p.temperature_f)
+    const high = Math.max(...temps)
+    const low = Math.min(...temps)
+    const avg = temps.reduce((sum, value) => sum + value, 0) / temps.length
+    return { high, low, avg }
+  }, [freezerRangePoints])
 
   useEffect(() => {
     if (!device) return
@@ -724,6 +785,142 @@ export function DeviceDetailPage() {
           Confirmed state is the physical truth. Desired state only reflects the most recent request.
         </p>
       </header>
+
+      {isFreezerDevice && (
+        <section className="panel page-section detail-card stack freezer-insight-card">
+          <div className="freezer-insight-card__header">
+            <div>
+              <p className="eyebrow">Freezer Lynk</p>
+              <h2>Temperature Overview</h2>
+            </div>
+            <div className="freezer-range-picker" role="tablist" aria-label="Freezer range">
+              {(['24h', '7d', '30d', 'custom'] as const).map((range) => (
+                <button
+                  key={range}
+                  type="button"
+                  className={`freezer-range-pill ${freezerRange === range ? 'is-active' : ''}`}
+                  onClick={() => setFreezerRange(range)}
+                >
+                  {range.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {freezerRange === 'custom' && (
+            <div className="freezer-custom-range">
+              <label>
+                <span className="label">From</span>
+                <input
+                  type="date"
+                  className="settings-location-input"
+                  value={customRangeStart}
+                  onChange={(e) => setCustomRangeStart(e.target.value)}
+                />
+              </label>
+              <label>
+                <span className="label">To</span>
+                <input
+                  type="date"
+                  className="settings-location-input"
+                  value={customRangeEnd}
+                  onChange={(e) => setCustomRangeEnd(e.target.value)}
+                />
+              </label>
+            </div>
+          )}
+
+          {freezerRangePoints.length < 2 ? (
+            <div className="empty-state">Not enough telemetry points in this range yet.</div>
+          ) : (
+            <div className="freezer-chart-wrap">
+              <div className="freezer-chart-yticks">
+                {freezerChart.yTicks.map((tick) => (
+                  <span key={tick.toFixed(2)}>{tick.toFixed(1)}\u00b0</span>
+                ))}
+              </div>
+              <svg
+                viewBox={`0 0 ${freezerChart.width} ${freezerChart.height}`}
+                className="freezer-chart-advanced"
+                preserveAspectRatio="none"
+              >
+                {freezerSettings?.temp_alarm_high_f !== undefined && (
+                  <rect
+                    x="0"
+                    y={Math.max(0, ((freezerChart.maxY - freezerSettings.temp_alarm_high_f) / Math.max(freezerChart.maxY - freezerChart.minY, 0.001)) * freezerChart.height)}
+                    width={freezerChart.width}
+                    height={Math.min(freezerChart.height, ((freezerSettings.temp_alarm_high_f - freezerChart.minY) / Math.max(freezerChart.maxY - freezerChart.minY, 0.001)) * freezerChart.height)}
+                    className="freezer-zone freezer-zone--alarm"
+                  />
+                )}
+                {freezerSettings?.temp_warning_high_f !== undefined && (
+                  <rect
+                    x="0"
+                    y={Math.max(0, ((freezerChart.maxY - freezerSettings.temp_warning_high_f) / Math.max(freezerChart.maxY - freezerChart.minY, 0.001)) * freezerChart.height)}
+                    width={freezerChart.width}
+                    height={Math.min(freezerChart.height, ((freezerSettings.temp_warning_high_f - freezerChart.minY) / Math.max(freezerChart.maxY - freezerChart.minY, 0.001)) * freezerChart.height)}
+                    className="freezer-zone freezer-zone--warning"
+                  />
+                )}
+
+                {freezerChart.yTicks.map((tick) => {
+                  const y = ((freezerChart.maxY - tick) / Math.max(freezerChart.maxY - freezerChart.minY, 0.001)) * freezerChart.height
+                  return (
+                    <line key={tick.toFixed(2)} x1="0" x2={freezerChart.width} y1={y} y2={y} className="freezer-gridline" />
+                  )
+                })}
+
+                {freezerSettings && (
+                  <>
+                    <line
+                      x1="0"
+                      x2={freezerChart.width}
+                      y1={((freezerChart.maxY - freezerSettings.temp_warning_high_f) / Math.max(freezerChart.maxY - freezerChart.minY, 0.001)) * freezerChart.height}
+                      y2={((freezerChart.maxY - freezerSettings.temp_warning_high_f) / Math.max(freezerChart.maxY - freezerChart.minY, 0.001)) * freezerChart.height}
+                      className="freezer-threshold freezer-threshold--warning"
+                    />
+                    <line
+                      x1="0"
+                      x2={freezerChart.width}
+                      y1={((freezerChart.maxY - freezerSettings.temp_alarm_high_f) / Math.max(freezerChart.maxY - freezerChart.minY, 0.001)) * freezerChart.height}
+                      y2={((freezerChart.maxY - freezerSettings.temp_alarm_high_f) / Math.max(freezerChart.maxY - freezerChart.minY, 0.001)) * freezerChart.height}
+                      className="freezer-threshold freezer-threshold--alarm"
+                    />
+                  </>
+                )}
+
+                <path d={freezerChart.path} className="freezer-trace" />
+                {freezerChart.markers.map((marker) => (
+                  <circle key={`${marker.ts}-${marker.x}`} cx={marker.x} cy={marker.y} r="4" className="freezer-marker" />
+                ))}
+              </svg>
+            </div>
+          )}
+
+          <div className="freezer-chart-stats">
+            <div className="key-value-item">
+              <span className="label">Current</span>
+              <strong>{freezerCurrentTemp === null ? '—' : `${freezerCurrentTemp.toFixed(1)}\u00b0F`}</strong>
+            </div>
+            <div className="key-value-item">
+              <span className="label">High</span>
+              <strong>{freezerStats.high === null ? '—' : `${freezerStats.high.toFixed(1)}\u00b0F`}</strong>
+            </div>
+            <div className="key-value-item">
+              <span className="label">Low</span>
+              <strong>{freezerStats.low === null ? '—' : `${freezerStats.low.toFixed(1)}\u00b0F`}</strong>
+            </div>
+            <div className="key-value-item">
+              <span className="label">Average</span>
+              <strong>{freezerStats.avg === null ? '—' : `${freezerStats.avg.toFixed(1)}\u00b0F`}</strong>
+            </div>
+            <div className="key-value-item">
+              <span className="label">Samples</span>
+              <strong>{freezerRangePoints.length}</strong>
+            </div>
+          </div>
+        </section>
+      )}
 
       <section className="detail-grid">
         <article className="panel detail-card stack">
@@ -884,26 +1081,7 @@ export function DeviceDetailPage() {
           <article className="panel detail-card stack">
             <div>
               <p className="eyebrow">Freezer Lynk</p>
-              <h2>Temperature & Thresholds</h2>
-            </div>
-
-            <div className="key-value-grid">
-              <div className="key-value-item">
-                <span className="label">Current Temp</span>
-                <strong>{freezerCurrentTemp === null ? '—' : `${freezerCurrentTemp.toFixed(1)}°F`}</strong>
-              </div>
-              <div className="key-value-item">
-                <span className="label">Samples (24h)</span>
-                <strong>{freezerHistory24h.length}</strong>
-              </div>
-              <div className="key-value-item">
-                <span className="label">Alarm Threshold</span>
-                <strong>{freezerSettings ? `${freezerSettings.temp_alarm_high_f.toFixed(1)}°F` : '—'}</strong>
-              </div>
-              <div className="key-value-item">
-                <span className="label">Warning Threshold</span>
-                <strong>{freezerSettings ? `${freezerSettings.temp_warning_high_f.toFixed(1)}°F` : '—'}</strong>
-              </div>
+              <h2>Threshold & Telemetry Settings</h2>
             </div>
 
             {freezerSettings && (
@@ -965,44 +1143,23 @@ export function DeviceDetailPage() {
 
           <article className="panel detail-card stack">
             <div>
-              <p className="eyebrow">Reading History</p>
-              <h2>Last 24h & Last 7d</h2>
+              <p className="eyebrow">Alert History</p>
+              <h2>Temperature Alerts</h2>
             </div>
 
-            <div>
-              <p className="label" style={{ marginBottom: 6 }}>24 Hours</p>
-              {freezer24hPath ? (
-                <svg viewBox="0 0 300 90" className="freezer-detail-chart" preserveAspectRatio="none">
-                  <path d={freezer24hPath} />
-                </svg>
-              ) : <div className="empty-state">Not enough points yet.</div>}
-            </div>
-
-            <div>
-              <p className="label" style={{ marginBottom: 6 }}>7 Days</p>
-              {freezer7dPath ? (
-                <svg viewBox="0 0 300 90" className="freezer-detail-chart" preserveAspectRatio="none">
-                  <path d={freezer7dPath} />
-                </svg>
-              ) : <div className="empty-state">No 7-day history yet.</div>}
-            </div>
-
-            <div>
-              <p className="eyebrow" style={{ marginBottom: 8 }}>Alert History</p>
-              {alertHistory.length === 0 ? (
-                <div className="empty-state">No alerts yet for this freezer.</div>
-              ) : (
-                <ul className="event-list">
-                  {alertHistory.map((item) => (
-                    <li key={String(item.id)} className="event-item">
-                      <span className="label">{String(item.severity ?? 'info')}</span>
-                      <p>{String(item.message ?? '')}</p>
-                      <p className="inline-note">{formatTimestamp(String(item.created_at ?? ''))}</p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+            {alertHistory.length === 0 ? (
+              <div className="empty-state">No alerts yet for this freezer.</div>
+            ) : (
+              <ul className="event-list">
+                {alertHistory.map((item) => (
+                  <li key={String(item.id)} className="event-item">
+                    <span className="label">{String(item.severity ?? 'info')}</span>
+                    <p>{String(item.message ?? '')}</p>
+                    <p className="inline-note">{formatTimestamp(String(item.created_at ?? ''))}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
           </article>
         </section>
       )}

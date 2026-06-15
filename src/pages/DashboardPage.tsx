@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { Activity, Bell, Cloud, Cpu, Droplets, Server, Snowflake, ToggleRight, Zap } from 'lucide-react'
 import { AlertsPanel } from '../components/dashboard/AlertsPanel'
 import { DashboardHeader } from '../components/dashboard/DashboardHeader'
+import { FieldLynkControlSheet } from '../components/dashboard/FieldLynkControlSheet'
+import { FreezerQuickDetailSheet } from '../components/dashboard/FreezerQuickDetailSheet'
 import { LongRunAlertModal } from '../components/dashboard/LongRunAlertModal'
 import { QuickActionsPanel } from '../components/dashboard/QuickActionsPanel'
 import { StatusCard, type StatusCardIcon } from '../components/dashboard/StatusCard'
@@ -47,6 +49,18 @@ type ModalPhase = 'question' | 'extended' | 'silenced' | 'awaiting-confirmation'
 type BannerState = {
   tone: DashboardTone
   message: string
+}
+
+type FreezerRange = '24h' | '7d' | '30d' | 'custom'
+
+type FreezerTrendPoint = {
+  temperatureF: number
+  timestamp: string
+}
+
+type FreezerTempRow = {
+  temperature_f: number
+  created_at: string
 }
 
 function formatClock(value: Date) {
@@ -109,16 +123,25 @@ function sparklinePath(points: number[], width = 120, height = 28): string {
     .join(' ')
 }
 
+function asNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
 const DEVICE_ICONS: Record<string, React.ElementType> = {
-  gateway:     Server,
-  fence:       Zap,
-  well_pump:   Droplets,
-  freezer:     Snowflake,
-  weather:     Cloud,
-  driveway:    Bell,
-  relay_node:  ToggleRight,
+  gateway: Server,
+  fence: Zap,
+  well_pump: Droplets,
+  freezer: Snowflake,
+  weather: Cloud,
+  driveway: Bell,
+  relay_node: ToggleRight,
   sensor_node: Activity,
-  custom:      Cpu,
+  custom: Cpu,
 }
 
 export function DashboardPage() {
@@ -130,6 +153,16 @@ export function DashboardPage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [modalPhase, setModalPhase] = useState<ModalPhase>('question')
   const [latestCommand, setLatestCommand] = useState<CommandRecord | null>(null)
+  const [isFieldSheetOpen, setIsFieldSheetOpen] = useState(false)
+  const [isFreezerSheetOpen, setIsFreezerSheetOpen] = useState(false)
+  const [selectedFreezerId, setSelectedFreezerId] = useState<string | null>(null)
+  const [freezerRange, setFreezerRange] = useState<FreezerRange>('24h')
+  const [freezerCustomStart, setFreezerCustomStart] = useState('')
+  const [freezerCustomEnd, setFreezerCustomEnd] = useState('')
+  const [freezerTrendPoints, setFreezerTrendPoints] = useState<FreezerTrendPoint[]>([])
+  const [isFreezerTrendLoading, setIsFreezerTrendLoading] = useState(false)
+  const [isFenceCommandSending, setIsFenceCommandSending] = useState(false)
+  const [fenceCommandProgress, setFenceCommandProgress] = useState('Waiting for command...')
   const [commandTimeline, setCommandTimeline] = useState<string[]>([])
   const [banner, setBanner] = useState<BannerState | null>(null)
   const [browserOnline, setBrowserOnline] = useState<boolean>(navigator.onLine)
@@ -289,8 +322,7 @@ export function DashboardPage() {
       : 0
 
     // Realtime alert subscription: adds new DB alerts and fires a local
-    // push notification for critical/warning alerts received while the app
-    // is in the background (supplements the gateway's push edge function call).
+
     const unsubscribeAlerts = isSupabaseConfigured
       ? subscribeToAlerts(async (newAlert) => {
           setAlerts((prev) => {
@@ -413,6 +445,107 @@ export function DashboardPage() {
     return `${n}/${devices.length}`
   }, [devices])
 
+  const selectedFreezer = useMemo(() => {
+    if (selectedFreezerId) {
+      const byId = devices.find((device) => device.id === selectedFreezerId && device.type === 'freezer')
+      if (byId) return byId
+    }
+    return devices.find((device) => device.type === 'freezer') ?? null
+  }, [devices, selectedFreezerId])
+
+  useEffect(() => {
+    let isActive = true
+
+    async function loadFreezerTrend() {
+      if (!isFreezerSheetOpen || !selectedFreezer) return
+
+      setIsFreezerTrendLoading(true)
+
+      const rangeMs = freezerRange === '24h'
+        ? 24 * 60 * 60 * 1000
+        : freezerRange === '7d'
+          ? 7 * 24 * 60 * 60 * 1000
+          : 30 * 24 * 60 * 60 * 1000
+
+      if (!isSupabaseConfigured || !supabase) {
+        const trend = Array.isArray(selectedFreezer.metadata.trend_points)
+          ? (selectedFreezer.metadata.trend_points as number[])
+          : []
+        const now = Date.now()
+        const points = trend.map((temp, index) => {
+          const at = trend.length <= 1
+            ? now
+            : now - rangeMs + (index / (trend.length - 1)) * rangeMs
+          return { temperatureF: Number(temp), timestamp: new Date(at).toISOString() }
+        })
+        if (isActive) {
+          setFreezerTrendPoints(points)
+          setIsFreezerTrendLoading(false)
+        }
+        return
+      }
+
+      const query = supabase
+        .from('freezer_temperature_logs')
+        .select('temperature_f, created_at')
+        .eq('device_id', selectedFreezer.id)
+        .order('created_at', { ascending: true })
+        .limit(5000)
+
+      const nowIso = new Date().toISOString()
+
+      const constrained = (() => {
+        if (freezerRange === '24h') {
+          const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+          return query.gte('created_at', since)
+        }
+        if (freezerRange === '7d') {
+          const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+          return query.gte('created_at', since)
+        }
+        if (freezerRange === '30d') {
+          const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+          return query.gte('created_at', since)
+        }
+
+        let customQuery = query
+        if (freezerCustomStart) {
+          customQuery = customQuery.gte('created_at', new Date(`${freezerCustomStart}T00:00:00`).toISOString())
+        } else {
+          customQuery = customQuery.gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString())
+        }
+
+        if (freezerCustomEnd) {
+          customQuery = customQuery.lte('created_at', new Date(`${freezerCustomEnd}T23:59:59`).toISOString())
+        } else {
+          customQuery = customQuery.lte('created_at', nowIso)
+        }
+
+        return customQuery
+      })()
+
+      const { data } = await constrained
+      if (!isActive) return
+
+      const points = (data ?? []).map((row) => {
+        const typed = row as FreezerTempRow
+        return {
+          temperatureF: Number(typed.temperature_f),
+          timestamp: typed.created_at,
+        }
+      })
+
+      setFreezerTrendPoints(points)
+      setIsFreezerTrendLoading(false)
+    }
+
+    void loadFreezerTrend()
+
+    return () => {
+      isActive = false
+    }
+  }, [isFreezerSheetOpen, selectedFreezer, freezerRange, freezerCustomStart, freezerCustomEnd])
+
   const summaryCards = useMemo(() => {
     if (!overview) return []
 
@@ -437,9 +570,10 @@ export function DashboardPage() {
     const fenceStatus = (() => {
       const cmdStatus = overview.fenceLine.commandStatus ?? 'idle'
       if (cmdStatus === 'verifying' || cmdStatus === 'sent' || cmdStatus === 'acknowledged') return 'Checking\u2026'
+      if (!fenceConnection.online) return 'Offline'
       if (fenceContactor === 'STUCK ON') return 'Stuck On'
       if (fenceContactor === 'FAILED')   return 'Fault'
-      return overview.fenceLine.chargerPower === 'ON' ? 'Secure' : 'Off'
+      return overview.fenceLine.chargerPower === 'ON' ? 'Secure' : 'Charger Off'
     })()
 
     const all = [
@@ -447,7 +581,7 @@ export function DashboardPage() {
         icon: 'fence' as StatusCardIcon,
         label: 'Fence',
         status: `State: ${fenceStatus}`,
-        detail: `Connection: ${fenceConnection.label} · ${overview.fenceLine.verificationNote}`,
+        detail: `Connection: ${fenceConnection.label} · Contactor: ${fenceContactor}`,
         tone: fenceTone,
       } : null,
       hasWellPump || !isSupabaseConfigured ? {
@@ -495,6 +629,27 @@ export function DashboardPage() {
     return all.filter(Boolean) as NonNullable<typeof all[number]>[]
   }, [nodesOnlineText, overview, liveWeather, devices])
 
+  function openFreezerSheet(deviceId?: string) {
+    const freezer = deviceId
+      ? devices.find((device) => device.id === deviceId && device.type === 'freezer')
+      : devices.find((device) => device.type === 'freezer')
+    if (!freezer) return
+    setSelectedFreezerId(freezer.id)
+    setFreezerRange('24h')
+    setFreezerCustomStart('')
+    setFreezerCustomEnd('')
+    setIsFreezerSheetOpen(true)
+  }
+
+  function freezerStatusLabel(device: DashboardDevice | null): 'Normal' | 'Warning' | 'Alarm' | 'Offline' {
+    if (!device) return 'Offline'
+    const connection = getDeviceOnlineStatus(device)
+    if (!connection.online) return 'Offline'
+    if (device.status === 'critical') return 'Alarm'
+    if (device.status === 'warning') return 'Warning'
+    return 'Normal'
+  }
+
   function clearCommandTimers() {
     timersRef.current.forEach((t) => window.clearTimeout(t))
     timersRef.current = []
@@ -516,6 +671,52 @@ export function DashboardPage() {
     if (status === 'verification_failed') return { tone: 'danger', message: 'Command not physically verified. Please check device status.' }
     if (status === 'failed') return { tone: 'danger', message: 'Command failed to complete.' }
     return { tone: 'info', message: 'Sending command...' }
+  }
+
+  function lifecycleProgressMessage(status: string, target: 'ON' | 'OFF') {
+    if (status === 'pending') return 'Sending command...'
+    if (status === 'gateway_received') return 'Command sent'
+    if (status === 'sent_to_node') return 'Waiting for confirmation...'
+    if (status === 'node_acknowledged') return `Field Lynk acknowledged ${target}`
+    if (status === 'verified') return `Aux contact confirmed ${target}`
+    if (status === 'verification_failed' || status === 'failed') return 'Failed to confirm, please check device status.'
+    return 'Waiting for command...'
+  }
+
+  function triggerCommandFeedback() {
+    try {
+      if ('vibrate' in navigator) {
+        navigator.vibrate([60, 40, 60])
+      }
+    } catch (error) {
+      console.warn('Vibration feedback unavailable', error)
+    }
+
+    try {
+      const AudioContextClass = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (!AudioContextClass) return
+
+      const ctx = new AudioContextClass()
+      const oscillator = ctx.createOscillator()
+      const gain = ctx.createGain()
+
+      oscillator.type = 'sine'
+      oscillator.frequency.value = 880
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.01)
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.16)
+
+      oscillator.connect(gain)
+      gain.connect(ctx.destination)
+
+      oscillator.start()
+      oscillator.stop(ctx.currentTime + 0.18)
+      oscillator.onended = () => {
+        void ctx.close()
+      }
+    } catch (error) {
+      console.warn('Audio feedback unavailable', error)
+    }
   }
 
   function mapCommandRowToRecord(row: Record<string, unknown>): CommandRecord {
@@ -571,6 +772,7 @@ export function DashboardPage() {
     clearCommandDeliveryTracking()
     setLatestCommand(command)
     setBanner(lifecycleMessage(command.status, target))
+    setFenceCommandProgress(lifecycleProgressMessage(command.status, target))
 
     const statusSeen = new Set<string>([command.status])
 
@@ -603,11 +805,14 @@ export function DashboardPage() {
       statusSeen.add(next.status)
       setLatestCommand(next)
       setBanner(lifecycleMessage(next.status, target))
+      setFenceCommandProgress(lifecycleProgressMessage(next.status, target))
       if (next.status === 'verified') {
         setLastSuccessfulCommandAt(new Date().toISOString())
+        setIsFenceCommandSending(false)
         clearCommandDeliveryTracking()
       }
       if (next.status === 'verification_failed' || next.status === 'failed') {
+        setIsFenceCommandSending(false)
         clearCommandDeliveryTracking()
       }
     }, 2000)
@@ -618,11 +823,14 @@ export function DashboardPage() {
       statusSeen.add(next.status)
       setLatestCommand(next)
       setBanner(lifecycleMessage(next.status, target))
+      setFenceCommandProgress(lifecycleProgressMessage(next.status, target))
       if (next.status === 'verified') {
         setLastSuccessfulCommandAt(new Date().toISOString())
+        setIsFenceCommandSending(false)
         clearCommandDeliveryTracking()
       }
       if (next.status === 'verification_failed' || next.status === 'failed') {
+        setIsFenceCommandSending(false)
         clearCommandDeliveryTracking()
       }
     })
@@ -707,14 +915,6 @@ export function DashboardPage() {
     timersRef.current = [t1, t2, t3]
   }
 
-  async function handleFenceOn() {
-    await sendFenceCommand('FENCE_TURN_ON')
-  }
-
-  async function handleFenceOff() {
-    await sendFenceCommand('FENCE_TURN_OFF')
-  }
-
   async function sendFenceCommand(commandType: 'FENCE_TURN_ON' | 'FENCE_TURN_OFF') {
     const fence = devices.find((d) => d.type === 'fence')
     if (!fence) return
@@ -723,8 +923,12 @@ export function DashboardPage() {
 
     if (!navigator.onLine) {
       setBanner({ tone: 'danger', message: 'No phone internet connection. Command was not sent.' })
+      setFenceCommandProgress('No phone internet connection. Command was not sent.')
       return
     }
+
+    setIsFenceCommandSending(true)
+    setFenceCommandProgress('Sending command...')
 
     if (isSupabaseConfigured) {
       const clientCommandId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.floor(Math.random() * 100000)}`)
@@ -741,20 +945,28 @@ export function DashboardPage() {
       const { command, error } = await Promise.race([sendPromise, timeoutPromise])
       if (error === 'timeout') {
         setBanner({ tone: 'danger', message: 'Command not sent. Poor connection or server unreachable.' })
+        setFenceCommandProgress('Command not sent. Poor connection or server unreachable.')
+        setIsFenceCommandSending(false)
         void reconcileTimedOutFenceCommand(fence.id, clientCommandId, target)
         return
       }
 
       if (error || !command) {
         setBanner({ tone: 'danger', message: 'Command not sent. Poor connection or server unreachable.' })
+        setFenceCommandProgress('Command not sent. Poor connection or server unreachable.')
+        setIsFenceCommandSending(false)
         return
       }
 
+      triggerCommandFeedback()
       setBanner({ tone: 'info', message: 'Command queued. Waiting for gateway...' })
       startFenceCommandTracking(command, target)
     } else {
       await createCommand({ target_device_id: fence.id, command_type: commandType, payload: {}, requested_by: 'home-tablet' })
+      triggerCommandFeedback()
       setBanner({ tone: 'info', message: `${target} command sent.` })
+      setFenceCommandProgress('Command sent')
+      setIsFenceCommandSending(false)
     }
   }
 
@@ -817,12 +1029,39 @@ export function DashboardPage() {
   const nonGatewayDevices = devices.filter((d) => d.type !== 'gateway')
   const gatewayDevice = devices.find((d) => d.type === 'gateway')
   const fieldNodeDevice = devices.find((d) => d.type === 'fence')
+  const freezerDevice = selectedFreezer ?? devices.find((d) => d.type === 'freezer') ?? null
   const gatewaySeen = gatewayDevice?.last_seen
     ? `${new Date(gatewayDevice.last_seen).toLocaleTimeString()} (${getDeviceOnlineStatus(gatewayDevice).label})`
     : 'Unknown'
   const fieldSeen = fieldNodeDevice?.last_seen
     ? `${new Date(fieldNodeDevice.last_seen).toLocaleTimeString()} (${getDeviceOnlineStatus(fieldNodeDevice).label})`
     : 'Unknown'
+  const fieldCardState = overview.fenceLine.chargerPower === 'ON' ? 'SECURE / ON' : 'OFF (Manual)'
+  const freezerConnection = freezerDevice
+    ? getDeviceOnlineStatus(freezerDevice).label
+    : 'OFFLINE'
+  const freezerCurrentTemp = (() => {
+    if (!freezerDevice) return '--'
+    const existing = String(freezerDevice.metadata.temperature ?? '').trim()
+    if (existing) return existing
+    const numeric = asNumber(freezerDevice.metadata.temperature_f)
+    return numeric === null ? '--' : `${numeric.toFixed(1)}F`
+  })()
+  const freezerBattery = (() => {
+    if (!freezerDevice) return 'n/a'
+    const pct = asNumber(freezerDevice.metadata.battery_percent)
+    if (pct !== null) return `${pct.toFixed(0)}%`
+    const volts = asNumber(freezerDevice.metadata.battery_voltage)
+    return volts !== null ? `${volts.toFixed(2)}V` : 'n/a'
+  })()
+  const freezerLastReport = freezerDevice?.metadata.updated
+    ? new Date(String(freezerDevice.metadata.updated)).toLocaleString()
+    : (freezerDevice?.last_seen ? new Date(freezerDevice.last_seen).toLocaleString() : 'Unknown')
+  const freezerConnectionType = freezerDevice
+    ? String(freezerDevice.metadata.connection_type ?? freezerDevice.metadata.network_type ?? 'LoRa')
+    : 'Unknown'
+  const freezerWarningF = asNumber(freezerDevice?.metadata.warning_high_f) ?? 5
+  const freezerAlarmF = asNumber(freezerDevice?.metadata.alarm_high_f) ?? 10
 
   return (
     <section className="dashboard-page dashboard-page--home">
@@ -839,10 +1078,13 @@ export function DashboardPage() {
           <StatusCard
             key={card.label}
             {...card}
-            {...(card.label === 'Fence' ? {
-              onToggleOn: () => void handleFenceOn(),
-              onToggleOff: () => void handleFenceOff(),
-            } : {})}
+            onClick={
+              card.label === 'Fence'
+                ? () => setIsFieldSheetOpen(true)
+                : card.label === 'Freezer'
+                  ? () => openFreezerSheet()
+                  : undefined
+            }
           />
         ))}
       </section>
@@ -858,7 +1100,13 @@ export function DashboardPage() {
                 key={device.id}
                 type="button"
                 className={`device-tile device-tile--${tone}`}
-                onClick={() => void navigate(`/devices/${device.id}`)}
+                onClick={() => {
+                  if (device.type === 'freezer') {
+                    openFreezerSheet(device.id)
+                    return
+                  }
+                  void navigate(`/devices/${device.id}`)
+                }}
               >
                 <div className="device-tile__head">
                   <span className="device-tile__icon-wrap">
@@ -929,6 +1177,57 @@ export function DashboardPage() {
         onExtend={() => void handleExtendRuntime()}
         onShutOff={() => void handleWellPumpShutoff()}
         onSilence={() => void handleSilenceAlert()}
+      />
+
+      <FieldLynkControlSheet
+        open={isFieldSheetOpen}
+        deviceName="Field Lynk"
+        currentState={fieldCardState}
+        connectionStatus={fieldNodeDevice ? getDeviceOnlineStatus(fieldNodeDevice).label : 'OFFLINE'}
+        auxFeedback={String(fieldNodeDevice?.metadata.contactor_feedback ?? 'Unknown')}
+        lastUpdate={fieldNodeDevice?.last_seen ? new Date(fieldNodeDevice.last_seen).toLocaleString() : 'Unknown'}
+        signalStrength={String(fieldNodeDevice?.metadata.rssi ?? 'n/a')}
+        commandProgress={fenceCommandProgress}
+        sending={isFenceCommandSending}
+        onClose={() => setIsFieldSheetOpen(false)}
+        onOpenSettings={() => {
+          setIsFieldSheetOpen(false)
+          void navigate('/settings')
+        }}
+        onHoldTurnOn={() => sendFenceCommand('FENCE_TURN_ON')}
+        onHoldTurnOff={() => sendFenceCommand('FENCE_TURN_OFF')}
+      />
+
+      <FreezerQuickDetailSheet
+        open={isFreezerSheetOpen}
+        deviceName={freezerDevice?.name ?? 'Freezer Lynk'}
+        currentTempLabel={freezerCurrentTemp}
+        statusLabel={freezerStatusLabel(freezerDevice)}
+        lastReportLabel={freezerLastReport}
+        batteryLabel={freezerBattery}
+        connectionLabel={freezerConnection}
+        connectionTypeLabel={freezerConnectionType}
+        range={freezerRange}
+        customStart={freezerCustomStart}
+        customEnd={freezerCustomEnd}
+        warningThresholdF={freezerWarningF}
+        alarmThresholdF={freezerAlarmF}
+        points={freezerTrendPoints}
+        loading={isFreezerTrendLoading}
+        onClose={() => setIsFreezerSheetOpen(false)}
+        onRangeChange={setFreezerRange}
+        onCustomStartChange={setFreezerCustomStart}
+        onCustomEndChange={setFreezerCustomEnd}
+        onOpenSettings={() => {
+          setIsFreezerSheetOpen(false)
+          if (!freezerDevice) return
+          void navigate(`/devices/${freezerDevice.id}`)
+        }}
+        onViewFullHistory={() => {
+          setIsFreezerSheetOpen(false)
+          if (!freezerDevice) return
+          void navigate(`/devices/${freezerDevice.id}#history`)
+        }}
       />
     </section>
   )
