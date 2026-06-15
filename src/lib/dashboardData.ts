@@ -598,16 +598,36 @@ export async function createLiveCommand(
 ): Promise<{ command: CommandRecord | null; error: string | null }> {
   if (!supabase) return { command: null, error: 'Supabase not configured.' }
 
-  const { data, error } = await supabase
+  let insertPayload: Record<string, unknown> = {
+    device_id: input.target_device_id,
+    command:   toGatewayCommand(input.command_type),
+    status:    'pending',
+    client_command_id: options?.clientCommandId ?? null,
+  }
+
+  let { data, error } = await supabase
     .from('device_commands')
-    .insert({
+    .insert(insertPayload)
+    .select('*')
+    .single()
+
+  // Backward compatibility: older DBs may not have client_command_id yet.
+  if (error && /client_command_id|column .* does not exist|schema cache/i.test(error.message ?? '')) {
+    insertPayload = {
       device_id: input.target_device_id,
       command:   toGatewayCommand(input.command_type),
       status:    'pending',
-      client_command_id: options?.clientCommandId ?? null,
-    })
-    .select('*')
-    .single()
+    }
+
+    const retry = await supabase
+      .from('device_commands')
+      .insert(insertPayload)
+      .select('*')
+      .single()
+
+    data = retry.data
+    error = retry.error
+  }
 
   if (error) return { command: null, error: error.message }
 

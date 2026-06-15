@@ -518,6 +518,55 @@ export function DashboardPage() {
     return { tone: 'info', message: 'Sending command...' }
   }
 
+  function mapCommandRowToRecord(row: Record<string, unknown>): CommandRecord {
+    const rawCmd = String(row.command ?? row.command_type ?? '').toLowerCase()
+    const mappedType: CommandRecord['command_type'] =
+      rawCmd === 'turn_on' ? 'FENCE_TURN_ON'
+      : rawCmd === 'turn_off' ? 'FENCE_TURN_OFF'
+      : rawCmd === 'fence_turn_on' ? 'FENCE_TURN_ON'
+      : rawCmd === 'fence_turn_off' ? 'FENCE_TURN_OFF'
+      : 'FENCE_TEST_RELAY'
+
+    return {
+      id: String(row.id),
+      target_device_id: String(row.device_id ?? ''),
+      command_type: mappedType,
+      payload: (row.payload as Record<string, string | number | boolean>) ?? {},
+      status: String(row.status ?? 'pending') as CommandRecord['status'],
+      requested_by: 'dashboard',
+      created_at: String(row.created_at ?? new Date().toISOString()),
+      sent_at: (row.sent_at as string | null) ?? null,
+      acknowledged_at: (row.acknowledged_at as string | null) ?? null,
+      confirmed_at: (row.confirmed_at as string | null) ?? null,
+      failure_reason: (row.failure_reason as string | null) ?? null,
+    }
+  }
+
+  async function reconcileTimedOutFenceCommand(deviceId: string, clientCommandId: string, target: 'ON' | 'OFF') {
+    if (!supabase) return
+
+    // Slow mobile links can exceed the 8 s send timeout even when the insert eventually succeeds.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const { data, error } = await supabase
+        .from('device_commands')
+        .select('id, device_id, command, command_type, payload, status, created_at, sent_at, acknowledged_at, confirmed_at, failure_reason, client_command_id')
+        .eq('device_id', deviceId)
+        .eq('client_command_id', clientCommandId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (!error && data) {
+        const recovered = mapCommandRowToRecord(data as Record<string, unknown>)
+        setBanner({ tone: 'warning', message: 'Slow connection detected. Command was queued; waiting for gateway...' })
+        startFenceCommandTracking(recovered, target)
+        return
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 2000))
+    }
+  }
+
   function startFenceCommandTracking(command: CommandRecord, target: 'ON' | 'OFF') {
     clearCommandDeliveryTracking()
     setLatestCommand(command)
@@ -549,28 +598,7 @@ export function DashboardPage() {
         .maybeSingle()
       if (error || !data) return
 
-      const row = data as Record<string, unknown>
-      const rawCmd = String(row.command ?? row.command_type ?? '').toLowerCase()
-      const mappedType: CommandRecord['command_type'] =
-        rawCmd === 'turn_on' ? 'FENCE_TURN_ON'
-        : rawCmd === 'turn_off' ? 'FENCE_TURN_OFF'
-        : rawCmd === 'fence_turn_on' ? 'FENCE_TURN_ON'
-        : rawCmd === 'fence_turn_off' ? 'FENCE_TURN_OFF'
-        : 'FENCE_TEST_RELAY'
-
-      const next: CommandRecord = {
-        id: String(row.id),
-        target_device_id: String(row.device_id ?? ''),
-        command_type: mappedType,
-        payload: (row.payload as Record<string, string | number | boolean>) ?? {},
-        status: String(row.status ?? 'pending') as CommandRecord['status'],
-        requested_by: 'dashboard',
-        created_at: String(row.created_at ?? new Date().toISOString()),
-        sent_at: (row.sent_at as string | null) ?? null,
-        acknowledged_at: (row.acknowledged_at as string | null) ?? null,
-        confirmed_at: (row.confirmed_at as string | null) ?? null,
-        failure_reason: (row.failure_reason as string | null) ?? null,
-      }
+      const next = mapCommandRowToRecord(data as Record<string, unknown>)
 
       statusSeen.add(next.status)
       setLatestCommand(next)
@@ -711,6 +739,12 @@ export function DashboardPage() {
       })
 
       const { command, error } = await Promise.race([sendPromise, timeoutPromise])
+      if (error === 'timeout') {
+        setBanner({ tone: 'danger', message: 'Command not sent. Poor connection or server unreachable.' })
+        void reconcileTimedOutFenceCommand(fence.id, clientCommandId, target)
+        return
+      }
+
       if (error || !command) {
         setBanner({ tone: 'danger', message: 'Command not sent. Poor connection or server unreachable.' })
         return

@@ -482,7 +482,18 @@ bool markCommandSent(const PendingCommand& command) {
   String payload;
   serializeJson(body, payload);
   if (!sendJsonPatch(url, payload, "PATCH device_commands sent")) {
-    return false;
+    // Backward compatibility: DB may not have lifecycle columns yet.
+    DynamicJsonDocument legacyBody(256);
+    legacyBody["status"] = "sent";
+    legacyBody["gateway_id"] = GATEWAY_ID;
+    if (sentAt.length() > 0) {
+      legacyBody["sent_at"] = sentAt;
+    }
+    String legacyPayload;
+    serializeJson(legacyBody, legacyPayload);
+    if (!sendJsonPatch(url, legacyPayload, "PATCH device_commands sent (legacy fallback)")) {
+      return false;
+    }
   }
 
   updateDeviceCommandStatus(command.deviceId, "sent", "pending");
@@ -504,7 +515,18 @@ bool markCommandAcknowledged(const PendingCommand& command, const String& confir
   String payload;
   serializeJson(body, payload);
   if (!sendJsonPatch(url, payload, "PATCH device_commands acknowledged")) {
-    return false;
+    // Backward compatibility: DB may not have node_acknowledged_at yet.
+    DynamicJsonDocument legacyBody(256);
+    legacyBody["status"] = "acknowledged";
+    legacyBody["error_message"] = nullptr;
+    if (acknowledgedAt.length() > 0) {
+      legacyBody["acknowledged_at"] = acknowledgedAt;
+    }
+    String legacyPayload;
+    serializeJson(legacyBody, legacyPayload);
+    if (!sendJsonPatch(url, legacyPayload, "PATCH device_commands acknowledged (legacy fallback)")) {
+      return false;
+    }
   }
 
   DynamicJsonDocument deviceBody(512);
