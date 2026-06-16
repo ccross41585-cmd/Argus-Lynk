@@ -29,13 +29,6 @@ function randomHex(size = 8): string {
     .toUpperCase()
 }
 
-function randomToken(size = 24): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(size))
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-}
-
 function normalizeChannel(channel: string | undefined): 'stable' | 'beta' {
   return channel?.toLowerCase() === 'beta' ? 'beta' : 'stable'
 }
@@ -84,7 +77,10 @@ serve(async (req: Request) => {
     const updateChannel = normalizeChannel(body.update_channel)
     const factoryId = body.factory_id?.trim() || null
     const deviceKey = body.device_key?.trim() || `FL-${randomHex(4)}`
-    const telemetryToken = randomToken(24)
+    // Edge functions are currently protected by Supabase JWT verification.
+    // Use the anon JWT as the device bearer token so firmware requests pass
+    // gateway auth and still have a stable token to validate in-function.
+    const telemetryToken = anonKey
 
     const serviceClient = createClient(supabaseUrl, serviceKey)
 

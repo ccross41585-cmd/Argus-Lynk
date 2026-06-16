@@ -45,6 +45,8 @@ const unsigned long PROVISIONING_TIMEOUT_MS = 0UL; // 0 = never timeout (loop fo
 const unsigned long MANIFEST_CHECK_INTERVAL_BOOT_CYCLES = 24;
 // Hold setup button this long at power-on to trigger factory reset
 const unsigned long FACTORY_RESET_HOLD_MS = 3000UL;
+// After boot, allow this long to press-and-hold setup for reset.
+const unsigned long FACTORY_RESET_ARM_WINDOW_MS = 8000UL;
 
 const int LED_R_PIN = 25;
 const int LED_G_PIN = 26;
@@ -271,36 +273,43 @@ bool buttonPressed() {
   return digitalRead(SETUP_BUTTON_PIN) == LOW;
 }
 
-// Called once immediately on wake-up.
-// If button is held for FACTORY_RESET_HOLD_MS seconds, wipe NVS and reboot.
-// On reboot the device will see no config and auto-enter provisioning mode.
-//
-// Customer flow:
-//   1. Hold setup button
-//   2. Power device on (or plug in USB)
-//   3. Keep holding 3 seconds → factory reset
+// Called once at startup.
+// User can press-and-hold setup for FACTORY_RESET_HOLD_MS within the first
+// FACTORY_RESET_ARM_WINDOW_MS after boot to wipe NVS and reboot.
 void checkFactoryResetAtBoot() {
-  if (!buttonPressed()) return;
+  logAlways("BTN", String("Reset window: press+hold setup for ") + (FACTORY_RESET_HOLD_MS / 1000UL) + "s within " + (FACTORY_RESET_ARM_WINDOW_MS / 1000UL) + "s after boot.");
 
-  logAlways("BTN", String("Setup button held at boot - hold ") + (FACTORY_RESET_HOLD_MS / 1000UL) + "s for factory reset...");
-  const unsigned long holdStart = millis();
+  const unsigned long windowStart = millis();
+  bool seenPress = false;
 
-  while (buttonPressed()) {
-    const unsigned long held = millis() - holdStart;
-    if (held >= FACTORY_RESET_HOLD_MS) {
-      logAlways("BTN", "Factory reset! Clearing NVS config and rebooting.");
-      blinkColor(true, false, false, 5, 150, 80);
-      clearStoredConfig();
-      delay(300);
-      ESP.restart();
+  while ((millis() - windowStart) < FACTORY_RESET_ARM_WINDOW_MS) {
+    if (!buttonPressed()) {
+      delay(20);
+      continue;
     }
-    // Blue blink as visual feedback while holding
-    blinkColor(false, false, true, 1, 30, 30);
-    delay(20);
-  }
 
-  const float heldSec = (millis() - holdStart) / 1000.0f;
-  logAlways("BTN", String("Button released after ") + String(heldSec, 1) + "s - continuing normal boot.");
+    if (!seenPress) {
+      seenPress = true;
+      logAlways("BTN", "Setup button detected. Keep holding for factory reset...");
+    }
+
+    const unsigned long holdStart = millis();
+    while (buttonPressed()) {
+      const unsigned long held = millis() - holdStart;
+      if (held >= FACTORY_RESET_HOLD_MS) {
+        logAlways("BTN", "Factory reset! Clearing NVS config and rebooting.");
+        blinkColor(true, false, false, 5, 150, 80);
+        clearStoredConfig();
+        delay(300);
+        ESP.restart();
+      }
+      blinkColor(false, false, true, 1, 30, 30);
+      delay(20);
+    }
+
+    const float heldSec = (millis() - holdStart) / 1000.0f;
+    logAlways("BTN", String("Button released after ") + String(heldSec, 1) + "s. Hold longer to reset.");
+  }
 }
 
 float readBatteryVoltage() {
