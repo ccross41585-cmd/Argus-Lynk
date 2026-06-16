@@ -23,6 +23,11 @@ interface DeviceRow {
   metadata: Record<string, unknown> | null
 }
 
+interface TelemetryAuthResult {
+  ok: boolean
+  reason?: string
+}
+
 interface FreezerSettingsRow {
   device_id: string
   temp_alarm_high_f: number
@@ -105,6 +110,33 @@ function metadataString(
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   return trimmed || null
+}
+
+function extractBearerToken(req: Request): string | null {
+  const authHeader = req.headers.get('authorization') ?? req.headers.get('Authorization')
+  if (!authHeader) return null
+  const match = authHeader.match(/^Bearer\s+(.+)$/i)
+  if (!match) return null
+  const token = match[1]?.trim()
+  return token || null
+}
+
+function validateTelemetryAuth(req: Request, device: DeviceRow): TelemetryAuthResult {
+  const metadataToken = metadataString(device.metadata, 'telemetry_token')
+  if (!metadataToken) {
+    return { ok: true }
+  }
+
+  const bearer = extractBearerToken(req)
+  if (!bearer) {
+    return { ok: false, reason: 'Missing bearer token for this device' }
+  }
+
+  if (bearer !== metadataToken) {
+    return { ok: false, reason: 'Invalid bearer token for this device' }
+  }
+
+  return { ok: true }
 }
 
 let devicesTenantColumnSupported: boolean | null = null
@@ -296,6 +328,11 @@ serve(async (req: Request) => {
   const kind = deviceKind(typedDevice)
   if (kind !== 'freezer_lynk' && kind !== 'freezer_alarm') {
     return json({ error: `device_key belongs to unsupported type: ${kind || 'unknown'}` }, 400)
+  }
+
+  const authResult = validateTelemetryAuth(req, typedDevice)
+  if (!authResult.ok) {
+    return json({ error: authResult.reason ?? 'Unauthorized' }, 401)
   }
 
   const nowIso = new Date().toISOString()

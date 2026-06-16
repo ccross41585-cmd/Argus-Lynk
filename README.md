@@ -125,13 +125,45 @@ Behavior:
 - deduplicates alarm transitions using `device_telemetry_state`
 - writes recovery events when temperature returns below warning threshold
 
-## Freezer Lynk Pairing (MVP)
+## Freezer Lynk Pairing + Provisioning
 
-From Settings → Device Setup wizard:
+New edge functions:
 
-1. Select `Freezer Lynk`
-2. Choose manual pairing
-3. Enter display name, location, and `device_key`
-4. Save
+- `supabase/functions/freezer-pair-device/index.ts`
+- `supabase/functions/freezer-firmware-manifest/index.ts`
 
-The UI inserts a `devices` row with `type=device_type=freezer_lynk` and initializes default `freezer_lynk_settings`.
+Settings wizard flow:
+
+1. Go to Settings → Device Setup → Add Device.
+2. Select `Freezer Lynk`.
+3. Enter display name + location + home Wi-Fi SSID/password.
+4. Put freezer device in setup mode (hold button ~4s).
+5. Connect phone/tablet to freezer AP (`FreezerLynk-XXXXXX`).
+6. Tap `Pair & Provision Freezer`.
+
+What happens:
+
+- `freezer-pair-device` creates the freezer row and settings.
+- It returns a per-device telemetry token + manifest URL.
+- UI posts that config to `http://192.168.4.1/configure` on the freezer.
+- If local POST fails (browser/device restriction), wizard shows manual fallback JSON payload.
+
+## Freezer OTA Manifest Env Vars
+
+Set these in Supabase Edge Function secrets:
+
+- `FREEZER_FIRMWARE_STABLE_VERSION`
+- `FREEZER_FIRMWARE_STABLE_URL`
+- `FREEZER_FIRMWARE_STABLE_SHA256` (optional)
+- `FREEZER_FIRMWARE_BETA_VERSION`
+- `FREEZER_FIRMWARE_BETA_URL`
+- `FREEZER_FIRMWARE_BETA_SHA256` (optional)
+- `FREEZER_FIRMWARE_MIN_BATTERY_PERCENT` (optional, default `20`)
+
+Firmware behavior:
+
+- Stores provisioned config in NVS (`Preferences`).
+- Falls back to hardcoded dev constants only when `DEV_FALLBACK_CONFIG=true`.
+- Exposes AP endpoints: `/status`, `/configure`, `/reset`.
+- Checks OTA manifest periodically and applies update when safe.
+- Sends bearer token on telemetry/manifest requests if present.
