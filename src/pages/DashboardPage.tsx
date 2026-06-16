@@ -576,6 +576,32 @@ export function DashboardPage() {
       return overview.fenceLine.chargerPower === 'ON' ? 'Secure' : 'Charger Off'
     })()
 
+    const freezerCards = devices
+      .filter((d) => d.type === 'freezer' && d.enabled !== false)
+      .map((d) => {
+        const temp = String(d.metadata.temperature ?? '').trim()
+        const tempF = asNumber(d.metadata.temperature_f)
+        const status = temp || (tempF !== null ? `${tempF.toFixed(1)}°F` : '—')
+        const connection = getDeviceOnlineStatus(d)
+        const detail = connection.online
+          ? (d.status === 'critical' ? 'Critical' : d.status === 'warning' ? 'Warning' : 'Normal')
+          : 'Offline'
+        return {
+          icon: 'freezer' as StatusCardIcon,
+          label: d.name,
+          status,
+          detail,
+          tone: d.status === 'critical'
+            ? ('danger' as const)
+            : d.status === 'warning'
+              ? ('warning' as const)
+              : connection.online
+                ? ('info' as const)
+                : ('neutral' as const),
+          freezerDeviceId: d.id,
+        }
+      })
+
     const all = [
       hasFence || !isSupabaseConfigured ? {
         icon: 'fence' as StatusCardIcon,
@@ -591,17 +617,22 @@ export function DashboardPage() {
         detail: `${overview.wellPump.runtime} runtime`,
         tone: overview.wellPump.alertState === 'Long Run Alert' ? ('warning' as const) : ('info' as const),
       } : null,
-      hasFreezer || !isSupabaseConfigured ? {
-        icon: 'freezer' as StatusCardIcon,
-        label: 'Freezer',
-        status: overview.freezer.temperature,
-        detail: overview.freezer.state,
-        tone: overview.freezer.state === 'Critical'
-          ? ('danger' as const)
-          : overview.freezer.state === 'Warning'
-            ? ('warning' as const)
-            : ('info' as const),
-      } : null,
+      ...(hasFreezer || !isSupabaseConfigured
+        ? (freezerCards.length > 0
+            ? freezerCards
+            : [{
+                icon: 'freezer' as StatusCardIcon,
+                label: 'Freezer',
+                status: overview.freezer.temperature,
+                detail: overview.freezer.state,
+                tone: overview.freezer.state === 'Critical'
+                  ? ('danger' as const)
+                  : overview.freezer.state === 'Warning'
+                    ? ('warning' as const)
+                    : ('info' as const),
+                freezerDeviceId: undefined,
+              }])
+        : []),
       hasDriveway || !isSupabaseConfigured ? {
         icon: 'driveway' as StatusCardIcon,
         label: 'Driveway',
@@ -1027,9 +1058,6 @@ export function DashboardPage() {
   }
 
   const nonGatewayDevices = devices.filter((d) => d.type !== 'gateway')
-  const freezerDevices = devices
-    .filter((d) => d.type === 'freezer' && d.enabled !== false)
-    .sort((a, b) => a.name.localeCompare(b.name))
   const gatewayDevice = devices.find((d) => d.type === 'gateway')
   const fieldNodeDevice = devices.find((d) => d.type === 'fence')
   const freezerDevice = selectedFreezer ?? devices.find((d) => d.type === 'freezer') ?? null
@@ -1079,67 +1107,18 @@ export function DashboardPage() {
       <section className="status-card-grid">
         {summaryCards.map((card) => (
           <StatusCard
-            key={card.label}
+            key={`status-${card.label}-${'freezerDeviceId' in card ? (card.freezerDeviceId ?? 'none') : 'base'}`}
             {...card}
             onClick={
               card.label === 'Fence'
                 ? () => setIsFieldSheetOpen(true)
-                : card.label === 'Freezer'
-                  ? () => openFreezerSheet()
+                : ('freezerDeviceId' in card)
+                  ? () => openFreezerSheet(card.freezerDeviceId)
                   : undefined
             }
           />
         ))}
       </section>
-
-      {freezerDevices.length > 0 && (
-        <section className="panel page-section settings-section">
-          <div className="settings-section__header">
-            <div>
-              <p className="eyebrow">Freezer Fleet</p>
-              <h2>Freezer Lynks</h2>
-            </div>
-            <StatusPill tone="info">{freezerDevices.length} device{freezerDevices.length === 1 ? '' : 's'}</StatusPill>
-          </div>
-
-          <div className="device-summary-grid">
-            {freezerDevices.map((device) => {
-              const tone = deviceStatusTone(device.status)
-              const connection = getDeviceOnlineStatus(device)
-              const lastSeen = device.last_seen
-                ? new Date(device.last_seen).toLocaleTimeString()
-                : 'Unknown'
-
-              return (
-                <button
-                  key={device.id}
-                  type="button"
-                  className={`device-tile device-tile--${tone}`}
-                  onClick={() => openFreezerSheet(device.id)}
-                >
-                  <div className="device-tile__head">
-                    <span className="device-tile__icon-wrap">
-                      <Snowflake size={14} aria-hidden="true" />
-                    </span>
-                    <span className="device-tile__name">{device.name}</span>
-                    <StatusPill tone={tone}>{device.status}</StatusPill>
-                  </div>
-                  {device.location && <p className="device-tile__location">{device.location}</p>}
-                  <p className="device-tile__metric">{getKeyMetric(device)}</p>
-                  <p className="device-tile__location">Last seen {lastSeen} ({connection.label})</p>
-                  {Array.isArray(device.metadata.trend_points) && device.metadata.trend_points.length > 1 && (
-                    <div className="device-tile__sparkline" aria-hidden="true">
-                      <svg viewBox="0 0 120 28" preserveAspectRatio="none">
-                        <path d={sparklinePath(device.metadata.trend_points as number[])} />
-                      </svg>
-                    </div>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-        </section>
-      )}
 
       <section className="overview-grid">
         {/* Left: compact device summary tiles */}
