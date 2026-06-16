@@ -372,10 +372,7 @@ bool readTemperature(float& outC, float& outF) {
     logAlways("SENSOR", "ERROR: No DS18B20 detected on GPIO 4");
     logAlways("SENSOR", "Check: (1) 4.7kΩ pullup resistor on DQ to 3.3V, (2) Power/GND connections, (3) Wiring to GPIO 4");
     sensorPowerOff();
-    // Mock data for testing without hardware
-    outC = 3.6f;
-    outF = 38.5f;
-    return true;
+    return false;
   }
 
   tempBus.requestTemperatures();
@@ -383,12 +380,9 @@ bool readTemperature(float& outC, float& outF) {
   const float tempF = cToF(tempC);
 
   if (isnan(tempC) || isnan(tempF) || tempC == DEVICE_DISCONNECTED_C || isInvalidDs18b20C(tempC)) {
-    logAlways("SENSOR", "Invalid DS18B20 reading - using mock temp 38.5F");
+    logAlways("SENSOR", "Invalid DS18B20 reading");
     sensorPowerOff();
-    // Mock data for testing
-    outC = 3.6f;
-    outF = 38.5f;
-    return true;
+    return false;
   }
 
   outC = tempC;
