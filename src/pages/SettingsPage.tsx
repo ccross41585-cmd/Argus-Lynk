@@ -26,7 +26,7 @@ import {
 } from '../services/pushNotifications'
 import { StatusPill } from '../components/StatusPill'
 import { maskProjectUrl } from '../lib/display'
-import { isSupabaseConfigured, supabase, supabaseUrl } from '../lib/supabase'
+import { isSupabaseConfigured, supabase, supabaseUrl, supabaseAnonKey } from '../lib/supabase'
 import { geocodeLocation, type GeoResult } from '../lib/weather'
 import { loadUserProfile, saveUserLocation } from '../lib/userProfile'
 import { getLiveDevices } from '../lib/dashboardData'
@@ -93,6 +93,17 @@ interface FreezerPairResponse {
     update_channel: string
   }
   error?: string
+}
+
+interface FreezerApStatusResponse {
+  ok: boolean
+  chip_id?: string
+  device_key?: string
+}
+
+type FreezerPairSession = {
+  device: { id: string; key: string; name: string }
+  config: NonNullable<FreezerPairResponse['config']>
 }
 
 const DEVICE_TYPE_OPTIONS: { value: DeviceTypeChoice; label: string; abbr: string }[] = [
@@ -166,6 +177,11 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
 
   const [devices, setDevices] = useState<DashboardDevice[]>([])
   const [wizard, setWizard] = useState<WizardState>(WIZARD_INIT)
+  const [freezerPairSession, setFreezerPairSession] = useState<FreezerPairSession | null>(null)
+  const [freezerPairingBusy, setFreezerPairingBusy] = useState(false)
+  const [freezerProvisionBusy, setFreezerProvisionBusy] = useState(false)
+  const [showWifiPassword, setShowWifiPassword] = useState(false)
+  const [freezerApChipId, setFreezerApChipId] = useState<string | null>(null)
   const [addedDevice, setAddedDevice] = useState<string | null>(null)
   const [detecting, setDetecting] = useState(false)
   const detectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -266,6 +282,11 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
   // ── Wizard helpers ────────────────────────────────────────────────────────
   function startWizard(prefilledType?: DeviceTypeChoice) {
     setWizard({ ...WIZARD_INIT, step: prefilledType ? 'method' : 'type', deviceType: prefilledType ?? null })
+    setFreezerPairSession(null)
+    setFreezerPairingBusy(false)
+    setFreezerProvisionBusy(false)
+    setShowWifiPassword(false)
+    setFreezerApChipId(null)
     setAddedDevice(null)
   }
 
@@ -299,7 +320,54 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
     }
   }
 
-  async function pairFreezerDevice(): Promise<FreezerPairResponse> {
+  async function fetchFreezerApStatus(): Promise<FreezerApStatusResponse | null> {
+    try {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 2500)
+      const response = await fetch('http://192.168.4.1/status', {
+        method: 'GET',
+        mode: 'cors',
+        signal: ctrl.signal,
+      })
+      clearTimeout(timer)
+      if (!response.ok) return null
+      return await response.json() as FreezerApStatusResponse
+    } catch {
+      return null
+    }
+  }
+
+  useEffect(() => {
+    if (wizard.step !== 'configure' || wizard.deviceType !== 'freezer') {
+      setFreezerApChipId(null)
+      return
+    }
+
+    let cancelled = false
+    void fetchFreezerApStatus().then((status) => {
+      if (cancelled || !status?.chip_id) return
+      const chip = status.chip_id.toUpperCase()
+      setFreezerApChipId(chip)
+
+      setWizard((w) => {
+        const current = w.deviceKey.trim()
+        const shouldAutofill = !current || /^node-/i.test(current)
+        if (!shouldAutofill) return w
+        return {
+          ...w,
+          deviceKey: `FL-${chip}`,
+          detectedNodeId: w.detectedNodeId || chip,
+          pairingError: null,
+        }
+      })
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [wizard.step, wizard.deviceType])
+
+  async function pairFreezerDevice(overrides?: { deviceKey?: string | null; factoryId?: string | null }): Promise<FreezerPairResponse> {
     if (!supabase || !isSupabaseConfigured) return { ok: false, error: 'Supabase is not configured.' }
 
     const { data: sessionData } = await supabase.auth.getSession()
@@ -310,25 +378,32 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
       display_name: wizard.displayName.trim() || 'Freezer Lynk',
       location_label: wizard.location.trim() || savedLocation || null,
       update_channel: wizard.updateChannel,
-      factory_id: wizard.detectedNodeId.trim() || null,
-      device_key: wizard.deviceKey.trim() || null,
+      factory_id: (overrides?.factoryId ?? wizard.detectedNodeId.trim()) || null,
+      device_key: (overrides?.deviceKey ?? wizard.deviceKey.trim()) || null,
     }
 
-    const response = await fetch(`${supabaseUrl}/functions/v1/freezer-pair-device`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify(payload),
-    })
+    try {
+      const response = await fetch(`${supabaseUrl}/functions/v1/freezer-pair-device`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(payload),
+      })
 
-    const body = await response.json().catch(() => ({})) as FreezerPairResponse
-    if (!response.ok) {
-      return { ok: false, error: body.error ?? `Pairing failed (${response.status})` }
+      const body = await response.json().catch(() => ({})) as FreezerPairResponse
+      if (!response.ok) {
+        return { ok: false, error: body.error ?? `Pairing failed (${response.status})` }
+      }
+
+      return body
+    } catch {
+      return {
+        ok: false,
+        error: 'Cloud pairing is unreachable on current connection. If you are on FreezerLynk Wi-Fi with weak/no mobile data, use manual fallback and pair ownership once internet is restored.',
+      }
     }
-
-    return body
   }
 
   async function pushConfigToFreezerAp(configPayload: FreezerPairResponse['config']): Promise<{ ok: boolean; error?: string }> {
@@ -362,41 +437,7 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
     const dbType = toDbDeviceType(wizard.deviceType ?? 'custom')
     const manualDeviceKey = wizard.deviceKey.trim() || wizard.detectedNodeId.trim() || null
 
-    if (dbType === 'freezer_lynk' && !localMode) {
-      const pairResult = await pairFreezerDevice()
-      if (!pairResult.ok || !pairResult.config || !pairResult.device) {
-        setWizard((w) => ({
-          ...w,
-          pairingError: pairResult.error ?? 'Pairing failed.',
-          pairingPayload: '',
-        }))
-        return
-      }
-
-      const localProvisionBody = JSON.stringify({
-        ...pairResult.config,
-        wifi_ssid: wizard.wifiSsid.trim(),
-        wifi_password: wizard.wifiPassword,
-        update_channel: wizard.updateChannel,
-      }, null, 2)
-
-      const provisionResult = await pushConfigToFreezerAp(pairResult.config)
-      if (!provisionResult.ok) {
-        setWizard((w) => ({
-          ...w,
-          pairingError: provisionResult.error ?? 'Unable to send config to freezer AP.',
-          pairingPayload: localProvisionBody,
-          deviceKey: pairResult.device?.key ?? w.deviceKey,
-        }))
-        return
-      }
-
-      setAddedDevice(`${pairResult.device.name} paired and provisioned`)
-      setWizard({ ...WIZARD_INIT, step: 'done' })
-      const fresh = await getLiveDevices()
-      setDevices(fresh)
-      return
-    }
+    if (dbType === 'freezer_lynk' && !localMode) return
 
     if (!localMode && supabase) {
       const defaultLocation = wizard.location.trim() || savedLocation || null
@@ -461,9 +502,100 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
     setWizard({ ...WIZARD_INIT, step: 'done' })
   }
 
+  async function freezerStep1PairCloud() {
+    setFreezerPairingBusy(true)
+    setWizard((w) => ({ ...w, pairingError: null }))
+
+    const apStatus = await fetchFreezerApStatus()
+    const apChip = apStatus?.chip_id?.toUpperCase() ?? null
+    const resolvedDeviceKey = wizard.deviceKey.trim() || (apChip ? `FL-${apChip}` : null)
+    const resolvedFactoryId = wizard.detectedNodeId.trim() || apChip || null
+
+    if (resolvedDeviceKey && resolvedDeviceKey !== wizard.deviceKey) {
+      setWizard((w) => ({ ...w, deviceKey: resolvedDeviceKey }))
+    }
+
+    const pairResult = await pairFreezerDevice({
+      deviceKey: resolvedDeviceKey,
+      factoryId: resolvedFactoryId,
+    })
+
+    if (!pairResult.ok || !pairResult.config || !pairResult.device) {
+      const fallbackConfigBody = JSON.stringify({
+        device_key: resolvedDeviceKey || `FL-${apChip ?? 'UNKNOWN'}`,
+        telemetry_url: `${supabaseUrl}/functions/v1/freezer-telemetry`,
+        telemetry_token: '',
+        supabase_anon_key: supabaseAnonKey || '',
+        firmware_manifest_url: `${supabaseUrl}/functions/v1/freezer-firmware-manifest`,
+        update_channel: wizard.updateChannel,
+        wifi_ssid: wizard.wifiSsid.trim(),
+        wifi_password: wizard.wifiPassword,
+      }, null, 2)
+
+      setWizard((w) => ({
+        ...w,
+        pairingError: pairResult.error ?? 'Cloud pairing failed.',
+        pairingPayload: fallbackConfigBody,
+      }))
+      setFreezerPairingBusy(false)
+      return
+    }
+
+    const localProvisionBody = JSON.stringify({
+      ...pairResult.config,
+      wifi_ssid: wizard.wifiSsid.trim(),
+      wifi_password: wizard.wifiPassword,
+      update_channel: wizard.updateChannel,
+    }, null, 2)
+
+    setFreezerPairSession({
+      device: pairResult.device,
+      config: pairResult.config,
+    })
+    setWizard((w) => ({
+      ...w,
+      pairingError: null,
+      pairingPayload: localProvisionBody,
+      deviceKey: pairResult.device?.key ?? w.deviceKey,
+    }))
+    setFreezerPairingBusy(false)
+  }
+
+  async function freezerStep2SendLocalConfig() {
+    if (!freezerPairSession?.config) {
+      setWizard((w) => ({ ...w, pairingError: 'Run Step 1 (Cloud Pair) first.' }))
+      return
+    }
+
+    setFreezerProvisionBusy(true)
+    setWizard((w) => ({ ...w, pairingError: null }))
+
+    const provisionResult = await pushConfigToFreezerAp(freezerPairSession.config)
+    if (!provisionResult.ok) {
+      setWizard((w) => ({
+        ...w,
+        pairingError: provisionResult.error ?? 'Unable to send config to freezer AP.',
+      }))
+      setFreezerProvisionBusy(false)
+      return
+    }
+
+    setAddedDevice(`${freezerPairSession.device.name} paired and provisioned`)
+    setWizard({ ...WIZARD_INIT, step: 'done' })
+    setFreezerPairSession(null)
+    setFreezerProvisionBusy(false)
+    const fresh = await getLiveDevices()
+    setDevices(fresh)
+  }
+
   function wizardClose() {
     if (detectTimerRef.current) clearTimeout(detectTimerRef.current)
     setWizard(WIZARD_INIT)
+    setFreezerPairSession(null)
+    setFreezerPairingBusy(false)
+    setFreezerProvisionBusy(false)
+    setShowWifiPassword(false)
+    setFreezerApChipId(null)
     setDetecting(false)
   }
 
@@ -864,8 +996,9 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
                 {wizard.deviceType === 'freezer' && (
                   <>
                     <div className="alert" style={{ padding: '10px 12px', borderRadius: 10, fontSize: '0.82rem' }}>
-                      Put the Freezer Lynk in setup mode (hold setup button 4 seconds) and connect your phone/tablet
-                      to its Wi-Fi access point before saving.
+                      <strong>Two-step setup:</strong><br />
+                      1) While online, run <strong>Step 1: Cloud Pair</strong>.<br />
+                      2) Join <strong>FreezerLynk-XXXXXX</strong> Wi-Fi, then run <strong>Step 2: Send Local Config</strong>.
                     </div>
 
                     <div style={{ display: 'grid', gap: 6 }}>
@@ -897,12 +1030,29 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
                       <input
                         id="wizard-freezer-wifi-pass"
                         className="settings-location-input"
-                        type="password"
+                        type={showWifiPassword ? 'text' : 'password'}
                         placeholder="Wi-Fi password"
                         value={wizard.wifiPassword}
                         onChange={(e) => setWizard((w) => ({ ...w, wifiPassword: e.target.value, pairingError: null }))}
                       />
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={showWifiPassword}
+                          onChange={(e) => setShowWifiPassword(e.target.checked)}
+                        />
+                        <span className="label">Show password</span>
+                      </label>
                     </div>
+
+                    {freezerApChipId && (
+                      <div className="alert" style={{ padding: '10px 12px', borderRadius: 10, fontSize: '0.82rem' }}>
+                        Connected Freezer AP chip ID: <strong className="mono">{freezerApChipId}</strong>
+                        {wizard.deviceKey.trim() && !wizard.deviceKey.toUpperCase().includes(freezerApChipId)
+                          ? ' — Device key does not match AP chip ID. Consider using FL-' + freezerApChipId + ' to avoid confusion.'
+                          : ''}
+                      </div>
+                    )}
 
                     <div style={{ display: 'grid', gap: 6 }}>
                       <label className="label" htmlFor="wizard-freezer-channel">Update Channel</label>
@@ -929,8 +1079,9 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
                     {wizard.pairingPayload && (
                       <div style={{ display: 'grid', gap: 8 }}>
                         <p className="label" style={{ margin: 0 }}>
-                          Manual fallback: open http://192.168.4.1 in your browser while connected to the freezer AP,
-                          then POST this JSON to /configure.
+                          Manual fallback: while connected to the freezer AP, open
+                          {' '}<strong>http://192.168.4.1</strong>{' '}
+                          and enter these values in the on-device setup page.
                         </p>
                         <textarea
                           className="settings-location-input"
@@ -940,6 +1091,31 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
                         />
                       </div>
                     )}
+
+                    <div style={{ display: 'grid', gap: 8 }}>
+                      <button
+                        type="button"
+                        className="action-button"
+                        disabled={freezerPairingBusy || !wizard.wifiSsid.trim()}
+                        onClick={() => void freezerStep1PairCloud()}
+                      >
+                        {freezerPairingBusy ? 'Pairing in Cloud…' : 'Step 1: Cloud Pair'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="action-button"
+                        disabled={freezerProvisionBusy || !freezerPairSession || !wizard.wifiSsid.trim()}
+                        onClick={() => void freezerStep2SendLocalConfig()}
+                      >
+                        {freezerProvisionBusy ? 'Sending to Freezer…' : 'Step 2: Send Local Config'}
+                      </button>
+
+                      <p className="label" style={{ margin: 0 }}>
+                        Step 2 requires your phone to be connected to FreezerLynk Wi-Fi.
+                        {freezerPairSession ? ` Cloud pair ready for ${freezerPairSession.device.key}.` : ' Run Step 1 first while online.'}
+                      </p>
+                    </div>
                   </>
                 )}
 
@@ -976,15 +1152,12 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
                   <span className="label">Pin to Home Overview</span>
                 </label>
 
-                {(() => {
+                {wizard.deviceType !== 'freezer' && (() => {
                   const missingName = !wizard.displayName.trim()
-                  const missingSSID = wizard.deviceType === 'freezer' && !wizard.wifiSsid.trim()
-                  const isDisabled = missingName || missingSSID
+                  const isDisabled = missingName
                   const hint = missingName
                     ? 'Enter a display name to continue'
-                    : missingSSID
-                      ? 'Enter your home Wi-Fi network name to continue'
-                      : null
+                    : null
                   return (
                     <>
                       {hint && (
@@ -998,7 +1171,7 @@ export function SettingsPage({ localMode, userId, onSignOut }: SettingsPageProps
                         onClick={() => void wizardSave()}
                         disabled={isDisabled}
                       >
-                        {wizard.deviceType === 'freezer' ? 'Pair & Provision Freezer' : 'Save Device'}
+                        Save Device
                       </button>
                     </>
                   )

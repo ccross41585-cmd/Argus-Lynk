@@ -21,4 +21,4 @@ export const supabase = isSupabaseConfigured
     })
   : null
 
-export { supabaseUrl }
+export { supabaseUrl, supabaseAnonKey }

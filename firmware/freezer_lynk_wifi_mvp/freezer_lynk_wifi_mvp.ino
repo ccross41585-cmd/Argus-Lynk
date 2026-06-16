@@ -645,6 +645,72 @@ void handleProvisioningCors() {
   provisioningServer.send(204);
 }
 
+void handleProvisioningRoot() {
+  const String defaultChannel = config.updateChannel.length() ? config.updateChannel : "stable";
+  const String defaultManifestUrl = config.firmwareManifestUrl.length() ? config.firmwareManifestUrl : DEV_MANIFEST_URL;
+  const String defaultTelemetryUrl = config.telemetryUrl.length() ? config.telemetryUrl : DEV_TELEMETRY_URL;
+
+  String html;
+  html.reserve(7000);
+  html += "<!doctype html><html><head><meta charset='utf-8'/>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'/>";
+  html += "<title>Freezer Lynk Setup</title>";
+  html += "<style>";
+  html += "body{font-family:Arial,sans-serif;background:#0b1220;color:#e6edf7;margin:0;padding:18px;}";
+  html += ".card{max-width:640px;margin:0 auto;background:#121a2b;border:1px solid #2a3858;border-radius:12px;padding:16px;}";
+  html += "h1{margin:0 0 6px;font-size:1.25rem;}";
+  html += "p{margin:6px 0 12px;color:#b6c4e2;}";
+  html += "label{display:block;margin-top:10px;font-size:.85rem;color:#b6c4e2;}";
+  html += "input,select,button{width:100%;box-sizing:border-box;border-radius:8px;border:1px solid #334a78;padding:10px;background:#0f172a;color:#e6edf7;}";
+  html += "button{margin-top:14px;background:#2563eb;border-color:#2563eb;font-weight:600;cursor:pointer;}";
+  html += "button:hover{background:#1d4ed8;}";
+  html += "#msg{margin-top:12px;white-space:pre-wrap;font-size:.85rem;}";
+  html += "</style></head><body><div class='card'>";
+  html += "<h1>Freezer Lynk Setup</h1>";
+  html += "<p>Enter device and Wi-Fi settings, then tap Save Configuration.</p>";
+
+  html += "<label>Device Key</label><input id=\"device_key\" value=\"" + escapeJson(config.deviceKey) + "\"/>";
+  html += "<label>Wi-Fi SSID</label><input id=\"wifi_ssid\" value=\"" + escapeJson(config.wifiSsid) + "\"/>";
+  html += "<label>Wi-Fi Password</label><input id=\"wifi_password\" type=\"password\" value=\"" + escapeJson(config.wifiPassword) + "\"/>";
+  html += "<label>Telemetry URL</label><input id=\"telemetry_url\" value=\"" + escapeJson(defaultTelemetryUrl) + "\"/>";
+  html += "<label>Telemetry Token (optional)</label><input id=\"telemetry_token\" value=\"" + escapeJson(config.telemetryToken) + "\"/>";
+  html += "<label>Supabase Anon Key (optional)</label><input id=\"supabase_anon_key\" value=\"" + escapeJson(config.supabaseAnonKey) + "\"/>";
+  html += "<label>Manifest URL (optional)</label><input id=\"firmware_manifest_url\" value=\"" + escapeJson(defaultManifestUrl) + "\"/>";
+  html += "<label>Update Channel</label><select id='update_channel'>";
+  html += "<option value='stable'" + String(defaultChannel == "stable" ? " selected" : "") + ">stable</option>";
+  html += "<option value='beta'" + String(defaultChannel == "beta" ? " selected" : "") + ">beta</option>";
+  html += "</select>";
+  html += "<button id='saveBtn' type='button'>Save Configuration</button>";
+  html += "<div id='msg'></div>";
+
+  html += "<script>";
+  html += "const msg=document.getElementById('msg');";
+  html += "document.getElementById('saveBtn').addEventListener('click',async()=>{";
+  html += "const payload={";
+  html += "device_key:document.getElementById('device_key').value.trim(),";
+  html += "wifi_ssid:document.getElementById('wifi_ssid').value.trim(),";
+  html += "wifi_password:document.getElementById('wifi_password').value,";
+  html += "telemetry_url:document.getElementById('telemetry_url').value.trim(),";
+  html += "telemetry_token:document.getElementById('telemetry_token').value.trim(),";
+  html += "supabase_anon_key:document.getElementById('supabase_anon_key').value.trim(),";
+  html += "firmware_manifest_url:document.getElementById('firmware_manifest_url').value.trim(),";
+  html += "update_channel:document.getElementById('update_channel').value";
+  html += "};";
+  html += "if(!payload.device_key||!payload.wifi_ssid||!payload.telemetry_url){msg.textContent='device_key, wifi_ssid, and telemetry_url are required.';return;}";
+  html += "msg.textContent='Saving configuration...';";
+  html += "try{";
+  html += "const r=await fetch('/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});";
+  html += "const t=await r.text();";
+  html += "msg.textContent=t || ('HTTP '+r.status);";
+  html += "if(r.ok){msg.textContent='Saved. Device will restart shortly.';}";
+  html += "}catch(e){msg.textContent='Request failed: '+(e?.message||e);}";
+  html += "});";
+  html += "</script></div></body></html>";
+
+  provisioningServer.sendHeader("Access-Control-Allow-Origin", "*");
+  provisioningServer.send(200, "text/html", html);
+}
+
 void handleProvisioningStatus() {
   // Refresh config snapshot for status response
   DeviceConfig snap;
@@ -728,9 +794,11 @@ void runProvisioningPortal() {
   logAlways("PROVISION", String("Setup URL: ") + setupUrl);
   logAlways("PROVISION", "Connect to the AP then POST config JSON to the setup URL.");
 
+  provisioningServer.on("/",          HTTP_GET,     handleProvisioningRoot);
   provisioningServer.on("/status",    HTTP_GET,     handleProvisioningStatus);
   provisioningServer.on("/configure", HTTP_POST,    handleProvisioningConfigure);
   provisioningServer.on("/reset",     HTTP_POST,    handleProvisioningReset);
+  provisioningServer.on("/",          HTTP_OPTIONS, handleProvisioningCors);
   provisioningServer.on("/status",    HTTP_OPTIONS, handleProvisioningCors);
   provisioningServer.on("/configure", HTTP_OPTIONS, handleProvisioningCors);
   provisioningServer.on("/reset",     HTTP_OPTIONS, handleProvisioningCors);
