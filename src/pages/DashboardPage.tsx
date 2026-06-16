@@ -177,6 +177,13 @@ export function DashboardPage() {
   const rearmTimerRef = useRef<number | null>(null)
   const commandStatusUnsubRef = useRef<(() => void) | null>(null)
   const commandTimeoutTimersRef = useRef<number[]>([])
+  const fenceCommandHardTimeoutRef = useRef<number | null>(null)
+  const fenceAutoCloseTimerRef = useRef<number | null>(null)
+  const activeFenceCommandIdRef = useRef<string | null>(null)
+  const activeFenceClientCommandIdRef = useRef<string | null>(null)
+  const activeFenceDeviceIdRef = useRef<string | null>(null)
+  const activeFenceDesiredStateRef = useRef<'ON' | 'OFF' | null>(null)
+  const fencePendingStateRef = useRef(false)
 
   useEffect(() => {
     let isActive = true
@@ -365,6 +372,8 @@ export function DashboardPage() {
       timersRef.current.forEach((t) => window.clearTimeout(t))
       commandStatusUnsubRef.current?.()
       commandTimeoutTimersRef.current.forEach((t) => window.clearTimeout(t))
+      if (fenceCommandHardTimeoutRef.current !== null) window.clearTimeout(fenceCommandHardTimeoutRef.current)
+      if (fenceAutoCloseTimerRef.current !== null) window.clearTimeout(fenceAutoCloseTimerRef.current)
       if (rearmTimerRef.current !== null) window.clearTimeout(rearmTimerRef.current)
     }
   }, [])
@@ -660,6 +669,52 @@ export function DashboardPage() {
     return all.filter(Boolean) as NonNullable<typeof all[number]>[]
   }, [nodesOnlineText, overview, liveWeather, devices])
 
+  useEffect(() => {
+    const trackedDeviceId = activeFenceDeviceIdRef.current
+    const target = activeFenceDesiredStateRef.current
+    if (!trackedDeviceId || !target || !fencePendingStateRef.current) return
+
+    const fenceDevice = devices.find((d) => d.id === trackedDeviceId)
+    if (!fenceDevice) return
+
+    const confirmedRaw = String(
+      fenceDevice.confirmed_state
+      ?? fenceDevice.metadata.confirmed_state
+      ?? fenceDevice.metadata.charger_power
+      ?? '',
+    ).toUpperCase()
+
+    const confirmedState = confirmedRaw.includes('ON') ? 'ON' : confirmedRaw.includes('OFF') ? 'OFF' : null
+    if (confirmedState === target) {
+      finalizeFenceCommand('success', target, `Confirmed ${target}`)
+    }
+  }, [devices])
+
+  useEffect(() => {
+    const trackedDeviceId = activeFenceDeviceIdRef.current
+    const fenceDevice = trackedDeviceId
+      ? devices.find((d) => d.id === trackedDeviceId)
+      : devices.find((d) => d.type === 'fence')
+
+    const confirmedRaw = String(
+      fenceDevice?.confirmed_state
+      ?? fenceDevice?.metadata.confirmed_state
+      ?? fenceDevice?.metadata.charger_power
+      ?? '',
+    ).toUpperCase()
+    const confirmedState = confirmedRaw.includes('ON') ? 'ON' : confirmedRaw.includes('OFF') ? 'OFF' : null
+
+    console.log('[FIELD MODAL COMMAND]', {
+      clientCommandId: activeFenceClientCommandIdRef.current,
+      commandRow: latestCommand,
+      commandStatus: latestCommand?.status ?? null,
+      desiredState: activeFenceDesiredStateRef.current,
+      confirmedState,
+      pendingState: fencePendingStateRef.current,
+      modalSending: isFenceCommandSending,
+    })
+  }, [devices, latestCommand, isFenceCommandSending])
+
   function openFreezerSheet(deviceId?: string) {
     const freezer = deviceId
       ? devices.find((device) => device.id === deviceId && device.type === 'freezer')
@@ -693,12 +748,56 @@ export function DashboardPage() {
     commandTimeoutTimersRef.current = []
   }
 
+  function clearFenceCommandRefs() {
+    activeFenceCommandIdRef.current = null
+    activeFenceClientCommandIdRef.current = null
+    activeFenceDeviceIdRef.current = null
+    activeFenceDesiredStateRef.current = null
+    fencePendingStateRef.current = false
+  }
+
+  function finalizeFenceCommand(
+    result: 'success' | 'failed' | 'timeout',
+    target: 'ON' | 'OFF',
+    message: string,
+  ) {
+    setFenceCommandProgress(message)
+    setIsFenceCommandSending(false)
+    fencePendingStateRef.current = false
+
+    if (fenceCommandHardTimeoutRef.current !== null) {
+      window.clearTimeout(fenceCommandHardTimeoutRef.current)
+      fenceCommandHardTimeoutRef.current = null
+    }
+
+    clearCommandDeliveryTracking()
+
+    if (result === 'success') {
+      setBanner({ tone: 'success', message: `${target} confirmed.` })
+      setLastSuccessfulCommandAt(new Date().toISOString())
+
+      if (fenceAutoCloseTimerRef.current !== null) window.clearTimeout(fenceAutoCloseTimerRef.current)
+      fenceAutoCloseTimerRef.current = window.setTimeout(() => {
+        setIsFieldSheetOpen(false)
+      }, 900)
+    } else if (result === 'timeout') {
+      setBanner({ tone: 'warning', message: 'Command status timed out. Check device state.' })
+    } else {
+      setBanner({ tone: 'danger', message })
+    }
+
+    clearFenceCommandRefs()
+  }
+
   function lifecycleMessage(status: string, target: 'ON' | 'OFF'): BannerState {
     if (status === 'pending') return { tone: 'info', message: 'Sending command...' }
     if (status === 'gateway_received') return { tone: 'info', message: 'Command queued. Waiting for gateway...' }
     if (status === 'sent_to_node') return { tone: 'info', message: 'Sent to Field Lynk...' }
-    if (status === 'node_acknowledged') return { tone: 'info', message: 'Field Lynk acknowledged...' }
+    if (status === 'node_acknowledged' || status === 'acknowledged') return { tone: 'info', message: 'Field Lynk acknowledged...' }
     if (status === 'verified') return { tone: 'success', message: `${target} confirmed.` }
+    if (status === 'completed') return { tone: 'success', message: `${target} confirmed.` }
+    if (status === 'gateway_timeout') return { tone: 'danger', message: 'Gateway timed out while sending command.' }
+    if (status === 'node_no_ack') return { tone: 'danger', message: 'Field Lynk did not acknowledge command.' }
     if (status === 'verification_failed') return { tone: 'danger', message: 'Command not physically verified. Please check device status.' }
     if (status === 'failed') return { tone: 'danger', message: 'Command failed to complete.' }
     return { tone: 'info', message: 'Sending command...' }
@@ -708,8 +807,11 @@ export function DashboardPage() {
     if (status === 'pending') return 'Sending command...'
     if (status === 'gateway_received') return 'Command sent'
     if (status === 'sent_to_node') return 'Waiting for confirmation...'
-    if (status === 'node_acknowledged') return `Field Lynk acknowledged ${target}`
+    if (status === 'node_acknowledged' || status === 'acknowledged') return `Field Lynk acknowledged ${target}`
     if (status === 'verified') return `Aux contact confirmed ${target}`
+    if (status === 'completed') return `Confirmed ${target}`
+    if (status === 'gateway_timeout') return 'Gateway timed out.'
+    if (status === 'node_no_ack') return 'Field Lynk did not acknowledge command.'
     if (status === 'verification_failed' || status === 'failed') return 'Failed to confirm, please check device status.'
     return 'Waiting for command...'
   }
@@ -791,7 +893,7 @@ export function DashboardPage() {
       if (!error && data) {
         const recovered = mapCommandRowToRecord(data as Record<string, unknown>)
         setBanner({ tone: 'warning', message: 'Slow connection detected. Command was queued; waiting for gateway...' })
-        startFenceCommandTracking(recovered, target)
+        startFenceCommandTracking(recovered, target, { clientCommandId, deviceId })
         return
       }
 
@@ -799,13 +901,38 @@ export function DashboardPage() {
     }
   }
 
-  function startFenceCommandTracking(command: CommandRecord, target: 'ON' | 'OFF') {
+  function startFenceCommandTracking(
+    command: CommandRecord,
+    target: 'ON' | 'OFF',
+    options?: { clientCommandId?: string; deviceId?: string },
+  ) {
     clearCommandDeliveryTracking()
+    if (fenceAutoCloseTimerRef.current !== null) {
+      window.clearTimeout(fenceAutoCloseTimerRef.current)
+      fenceAutoCloseTimerRef.current = null
+    }
+
+    activeFenceCommandIdRef.current = command.id
+    activeFenceClientCommandIdRef.current = options?.clientCommandId ?? activeFenceClientCommandIdRef.current
+    activeFenceDeviceIdRef.current = options?.deviceId ?? command.target_device_id
+    activeFenceDesiredStateRef.current = target
+    fencePendingStateRef.current = true
+
     setLatestCommand(command)
     setBanner(lifecycleMessage(command.status, target))
     setFenceCommandProgress(lifecycleProgressMessage(command.status, target))
+    setIsFenceCommandSending(true)
 
     const statusSeen = new Set<string>([command.status])
+    const successStatuses = new Set(['verified', 'completed', 'acknowledged', 'node_acknowledged'])
+    const failureStatuses = new Set(['verification_failed', 'failed', 'gateway_timeout', 'node_no_ack'])
+
+    if (fenceCommandHardTimeoutRef.current !== null) {
+      window.clearTimeout(fenceCommandHardTimeoutRef.current)
+    }
+    fenceCommandHardTimeoutRef.current = window.setTimeout(() => {
+      finalizeFenceCommand('timeout', target, 'Command status timed out. Check device state.')
+    }, 45_000)
 
     const t8 = window.setTimeout(() => {
       if (!statusSeen.has('gateway_received')) {
@@ -826,25 +953,42 @@ export function DashboardPage() {
       if (!supabase) return
       const { data, error } = await supabase
         .from('device_commands')
-        .select('id, device_id, command, command_type, payload, status, created_at, sent_at, acknowledged_at, confirmed_at, failure_reason')
+        .select('id, device_id, command, command_type, payload, status, created_at, sent_at, acknowledged_at, confirmed_at, failure_reason, client_command_id')
         .eq('id', command.id)
         .maybeSingle()
-      if (error || !data) return
 
-      const next = mapCommandRowToRecord(data as Record<string, unknown>)
+      let resolvedRow = data as Record<string, unknown> | null
+      if ((!resolvedRow || error) && supabase && activeFenceClientCommandIdRef.current && activeFenceDeviceIdRef.current) {
+        const fallback = await supabase
+          .from('device_commands')
+          .select('id, device_id, command, command_type, payload, status, created_at, sent_at, acknowledged_at, confirmed_at, failure_reason, client_command_id')
+          .eq('device_id', activeFenceDeviceIdRef.current)
+          .eq('client_command_id', activeFenceClientCommandIdRef.current)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (!fallback.error && fallback.data) {
+          resolvedRow = fallback.data as Record<string, unknown>
+        }
+      }
+
+      if (!resolvedRow) return
+
+      const next = mapCommandRowToRecord(resolvedRow)
+      activeFenceCommandIdRef.current = next.id
 
       statusSeen.add(next.status)
       setLatestCommand(next)
       setBanner(lifecycleMessage(next.status, target))
       setFenceCommandProgress(lifecycleProgressMessage(next.status, target))
-      if (next.status === 'verified') {
-        setLastSuccessfulCommandAt(new Date().toISOString())
-        setIsFenceCommandSending(false)
-        clearCommandDeliveryTracking()
+
+      if (successStatuses.has(next.status)) {
+        finalizeFenceCommand('success', target, `Confirmed ${target}`)
+        return
       }
-      if (next.status === 'verification_failed' || next.status === 'failed') {
-        setIsFenceCommandSending(false)
-        clearCommandDeliveryTracking()
+      if (failureStatuses.has(next.status)) {
+        finalizeFenceCommand('failed', target, lifecycleMessage(next.status, target).message)
       }
     }, 2000)
 
@@ -852,17 +996,17 @@ export function DashboardPage() {
 
     commandStatusUnsubRef.current = subscribeToCommandStatus(command.id, (next) => {
       statusSeen.add(next.status)
+      activeFenceCommandIdRef.current = next.id
       setLatestCommand(next)
       setBanner(lifecycleMessage(next.status, target))
       setFenceCommandProgress(lifecycleProgressMessage(next.status, target))
-      if (next.status === 'verified') {
-        setLastSuccessfulCommandAt(new Date().toISOString())
-        setIsFenceCommandSending(false)
-        clearCommandDeliveryTracking()
+
+      if (successStatuses.has(next.status)) {
+        finalizeFenceCommand('success', target, `Confirmed ${target}`)
+        return
       }
-      if (next.status === 'verification_failed' || next.status === 'failed') {
-        setIsFenceCommandSending(false)
-        clearCommandDeliveryTracking()
+      if (failureStatuses.has(next.status)) {
+        finalizeFenceCommand('failed', target, lifecycleMessage(next.status, target).message)
       }
     })
   }
@@ -960,9 +1104,13 @@ export function DashboardPage() {
 
     setIsFenceCommandSending(true)
     setFenceCommandProgress('Sending command...')
+    fencePendingStateRef.current = true
+    activeFenceDeviceIdRef.current = fence.id
+    activeFenceDesiredStateRef.current = target
 
     if (isSupabaseConfigured) {
       const clientCommandId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.floor(Math.random() * 100000)}`)
+      activeFenceClientCommandIdRef.current = clientCommandId
       setBanner({ tone: 'info', message: 'Sending command...' })
 
       const sendPromise = createLiveCommand(
@@ -991,7 +1139,7 @@ export function DashboardPage() {
 
       triggerCommandFeedback()
       setBanner({ tone: 'info', message: 'Command queued. Waiting for gateway...' })
-      startFenceCommandTracking(command, target)
+      startFenceCommandTracking(command, target, { clientCommandId, deviceId: fence.id })
     } else {
       await createCommand({ target_device_id: fence.id, command_type: commandType, payload: {}, requested_by: 'home-tablet' })
       triggerCommandFeedback()
