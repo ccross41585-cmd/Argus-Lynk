@@ -46,6 +46,7 @@ const overview: DashboardOverview = {
     state: 'Normal',
     safeRange: 'Safe range -10°F to 5°F',
     node: 'Online',
+    healthLabel: 'Healthy',
     lastUpdatedLabel: '1 min ago',
   },
   drivewayAlarm: {

@@ -1,13 +1,13 @@
 import { StatusPill } from '../StatusPill'
 
+type FreezerHealthLabel = 'Healthy' | 'Delayed' | 'Missing' | 'Warning' | 'Alarm'
+
 type FreezerCardProps = {
   temperature: string
   safeRange: string
-  node: 'Online' | 'Offline'
+  healthLabel: FreezerHealthLabel
   lastUpdated: string
-  alertState: 'Normal' | 'Warning' | 'Critical'
   alarmThreshold?: string
-  batteryLabel?: string
   trendPoints?: number[]
   onViewDetails: () => void
 }
@@ -15,15 +15,18 @@ type FreezerCardProps = {
 export function FreezerCard({
   temperature,
   safeRange,
-  node,
+  healthLabel,
   lastUpdated,
-  alertState,
   alarmThreshold,
-  batteryLabel,
   trendPoints,
   onViewDetails,
 }: FreezerCardProps) {
-  const tone = alertState === 'Critical' ? 'danger' : alertState === 'Warning' ? 'warning' : 'info'
+  const tone =
+    healthLabel === 'Alarm' ? 'danger'
+    : healthLabel === 'Warning' ? 'warning'
+    : healthLabel === 'Missing' ? 'danger'
+    : healthLabel === 'Delayed' ? 'warning'
+    : 'info'
   const trend = (trendPoints ?? []).slice(-24)
 
   const path = (() => {
@@ -45,7 +48,7 @@ export function FreezerCard({
     <section className="compact-card" id="freezer">
       <div className="compact-card__header">
         <p className="eyebrow">Freezer</p>
-        <StatusPill tone={tone}>{alertState}</StatusPill>
+        <StatusPill tone={tone}>{healthLabel}</StatusPill>
       </div>
 
       <div className="compact-card__hero-temp">
@@ -54,24 +57,14 @@ export function FreezerCard({
       </div>
 
       <div className="data-rows">
-        <div className="data-row">
-          <span className="label">Node</span>
-          <strong className={node === 'Online' ? 'value-green' : 'value-danger'}>{node}</strong>
-        </div>
         {alarmThreshold && (
           <div className="data-row">
             <span className="label">Alarm Threshold</span>
             <strong>{alarmThreshold}</strong>
           </div>
         )}
-        {batteryLabel && (
-          <div className="data-row">
-            <span className="label">Battery</span>
-            <strong>{batteryLabel}</strong>
-          </div>
-        )}
         <div className="data-row">
-          <span className="label">Last Update</span>
+          <span className="label">Last Report</span>
           <strong>{lastUpdated}</strong>
         </div>
       </div>

@@ -608,12 +608,55 @@ serve(async (req: Request) => {
 
   if (upsertStateErr) return fail('upsert_telemetry_state', upsertStateErr.message)
 
+  // Resolve any active offline/missing alert and send reconnected push notification
+  const { data: activeOfflineAlerts } = await supabase
+    .from('alerts')
+    .select('id')
+    .eq('device_id', typedDevice.id)
+    .eq('title', 'Freezer Lynk Offline')
+    .eq('status', 'active')
+    .is('resolved_at', null)
+
+  if (activeOfflineAlerts && activeOfflineAlerts.length > 0) {
+    const offlineIds = activeOfflineAlerts.map((a: { id: string }) => a.id)
+    await supabase
+      .from('alerts')
+      .update({ status: 'resolved', resolved_at: nowIso })
+      .in('id', offlineIds)
+
+    // Send reconnected push notification
+    const { data: reconnectRow } = await supabase
+      .from('alerts')
+      .insert({
+        device_id: typedDevice.id,
+        severity: 'info',
+        title: 'Freezer Lynk Reconnected',
+        message: `${typedDevice.name} is reporting again.`,
+        status: 'resolved',
+        resolved_at: nowIso,
+      })
+      .select('id')
+      .single()
+
+    if (reconnectRow?.id) {
+      await bestEffortSendPushForAlert(String(reconnectRow.id), {
+        targetUserId: ownerTargetUserId,
+        url: deviceDeepLink,
+        deviceId: typedDevice.id,
+        deviceType: 'freezer_lynk',
+        alertType: 'freezer_reconnected',
+      })
+    }
+  }
+
   const metadata = {
     ...(typedDevice.metadata ?? {}),
     owner_user_id: ownerUserId ?? configuredOwnerUserId ?? null,
     owner_location_label: typedDevice.location ?? configuredLocationLabel ?? null,
     transport: 'wifi',
     freezer_state: nextState,
+    connection_health: 'healthy',
+    last_connection_check_at: nowIso,
     temperature: `${temperatureF.toFixed(1)}°F`,
     temperature_f: temperatureF,
     temperature_c: temperatureC,

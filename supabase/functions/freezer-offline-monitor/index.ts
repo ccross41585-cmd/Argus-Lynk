@@ -290,7 +290,8 @@ serve(async (req: Request) => {
       last_connection_check_at: nowIso,
       connection_age_minutes: ageMinutes,
       expected_report_minutes: loggingIntervalMinutes,
-      offline_after_minutes: offlineAfterMinutes,
+      delayed_after_minutes: delayedThresholdMinutes,
+      missing_after_minutes: offlineAfterMinutes,
     }
 
     // Handle state transitions and updates

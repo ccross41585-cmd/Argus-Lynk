@@ -64,6 +64,7 @@ export interface DashboardOverview {
     state: 'Normal' | 'Warning' | 'Critical'
     safeRange: string
     node: 'Online' | 'Offline'
+    healthLabel: 'Healthy' | 'Delayed' | 'Missing' | 'Warning' | 'Alarm'
     lastUpdatedLabel: string
   }
   drivewayAlarm: {

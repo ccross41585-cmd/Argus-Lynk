@@ -591,24 +591,29 @@ export function DashboardPage() {
         const temp = String(d.metadata.temperature ?? '').trim()
         const tempF = asNumber(d.metadata.temperature_f)
         const status = temp || (tempF !== null ? `${tempF.toFixed(1)}°F` : '—')
-        // Freezer Lynk devices are managed by the offline monitor - trust devices.online directly
-        const isFreezerLynk = d.type === 'freezer'
-        const connection = getDeviceOnlineStatus({ ...d, trustOnlineField: isFreezerLynk })
-        const detail = connection.online
-          ? (d.status === 'critical' ? 'Critical' : d.status === 'warning' ? 'Warning' : 'Normal')
-          : 'Offline'
+
+        // Derive connection health label from metadata, never from frontend timestamp
+        const tempState = String(d.metadata.freezer_state ?? '').toLowerCase()
+        const connHealth = String(d.metadata.connection_health ?? '').toLowerCase()
+        let healthLabel: string
+        if (tempState === 'alarm') healthLabel = 'Alarm'
+        else if (tempState === 'warning') healthLabel = 'Warning'
+        else if (connHealth === 'missing') healthLabel = 'Missing'
+        else if (connHealth === 'delayed') healthLabel = 'Delayed'
+        else if (connHealth === 'healthy') healthLabel = 'Healthy'
+        else healthLabel = d.online ? 'Healthy' : 'Missing'
+
+        const tone =
+          healthLabel === 'Alarm' || healthLabel === 'Missing' ? ('danger' as const)
+          : healthLabel === 'Warning' || healthLabel === 'Delayed' ? ('warning' as const)
+          : ('info' as const)
+
         return {
           icon: 'freezer' as StatusCardIcon,
           label: d.name,
           status,
-          detail,
-          tone: d.status === 'critical'
-            ? ('danger' as const)
-            : d.status === 'warning'
-              ? ('warning' as const)
-              : connection.online
-                ? ('info' as const)
-                : ('neutral' as const),
+          detail: healthLabel,
+          tone,
           freezerDeviceId: d.id,
         }
       })

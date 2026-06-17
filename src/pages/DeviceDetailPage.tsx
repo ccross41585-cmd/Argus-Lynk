@@ -231,9 +231,8 @@ function LocalDeviceDetail({ deviceId }: { deviceId: string }) {
         <FreezerCard
           temperature={overview.freezer.temperature}
           safeRange={overview.freezer.safeRange}
-          node={overview.freezer.node}
+          healthLabel={overview.freezer.healthLabel}
           lastUpdated={overview.freezer.lastUpdatedLabel}
-          alertState={overview.freezer.state}
           onViewDetails={() => { /* already on detail page */ }}
         />
       )}

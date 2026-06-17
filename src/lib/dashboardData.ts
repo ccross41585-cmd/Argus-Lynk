@@ -446,6 +446,18 @@ export function buildOverview(devices: DashboardDevice[]): DashboardOverview {
               : 'Normal',
       safeRange:        `Warn > ${String(freezer?.metadata.warning_high_f ?? 5)}°F · Alarm > ${String(freezer?.metadata.alarm_high_f ?? 10)}°F`,
       node:             freezer && isDeviceOnline(freezer) ? 'Online' : 'Offline',
+      healthLabel:      (() => {
+        if (!freezer) return 'Missing'
+        const tempState = String(freezer.metadata.freezer_state ?? '').toLowerCase()
+        if (tempState === 'alarm') return 'Alarm'
+        if (tempState === 'warning') return 'Warning'
+        const health = String(freezer.metadata.connection_health ?? '').toLowerCase()
+        if (health === 'missing') return 'Missing'
+        if (health === 'delayed') return 'Delayed'
+        if (health === 'healthy') return 'Healthy'
+        // Fallback: trust devices.online when no health metadata yet
+        return freezer.online ? 'Healthy' : 'Missing'
+      })() as 'Healthy' | 'Delayed' | 'Missing' | 'Warning' | 'Alarm',
       lastUpdatedLabel: String(freezer?.metadata.updated ?? '—'),
     },
     drivewayAlarm: {
