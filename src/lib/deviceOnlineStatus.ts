@@ -7,6 +7,8 @@ export type DeviceOnlineInput = {
   last_heartbeat?: string | null
   lastHeartbeat?: string | null
   updated_at?: string | null
+  // If true, skip timestamp-based check and trust the online field directly
+  trustOnlineField?: boolean
 }
 
 export type DeviceOnlineStatus = {
@@ -34,6 +36,19 @@ export function getDeviceOnlineStatus(device: DeviceOnlineInput): DeviceOnlineSt
     null
 
   const lastSeenMs = parseTimestampMs(lastSeenRaw)
+
+  // If caller requests to trust the backend online field directly (e.g. deep-sleep devices
+  // managed by the offline monitor), skip frontend timestamp math entirely.
+  if (device.trustOnlineField) {
+    const online = Boolean(device.online)
+    return {
+      online,
+      label: online ? 'ONLINE' : 'OFFLINE',
+      lastSeenMs,
+      ageMs: lastSeenMs ? now - lastSeenMs : null,
+    }
+  }
+
   const hasFreshSeen = lastSeenMs > 0 && now - lastSeenMs < ONLINE_TIMEOUT_MS
 
   const online =

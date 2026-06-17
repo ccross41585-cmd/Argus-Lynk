@@ -591,7 +591,9 @@ export function DashboardPage() {
         const temp = String(d.metadata.temperature ?? '').trim()
         const tempF = asNumber(d.metadata.temperature_f)
         const status = temp || (tempF !== null ? `${tempF.toFixed(1)}°F` : '—')
-        const connection = getDeviceOnlineStatus(d)
+        // Freezer Lynk devices are managed by the offline monitor - trust devices.online directly
+        const isFreezerLynk = d.type === 'freezer'
+        const connection = getDeviceOnlineStatus({ ...d, trustOnlineField: isFreezerLynk })
         const detail = connection.online
           ? (d.status === 'critical' ? 'Critical' : d.status === 'warning' ? 'Warning' : 'Normal')
           : 'Offline'
