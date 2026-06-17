@@ -231,14 +231,6 @@ serve(async (req: Request) => {
   let offlineAlertsResolved = 0
   let skippedDisabled = 0
 
-  let healthyCount = 0
-  let delayedCount = 0
-  let missingCount = 0
-  let markedMissing = 0
-  let skippedAlreadyMissing = 0
-  let offlineAlertsCreated = 0
-  let offlineAlertsResolved = 0
-
   for (const row of devices) {
     if (!isFreezer(row)) continue
     checkedFreezers += 1
