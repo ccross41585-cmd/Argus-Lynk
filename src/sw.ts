@@ -15,6 +15,9 @@ interface NotificationData {
   url?: string
   alertId?: string
   deviceId?: string
+  kind?: string
+  dedupeKey?: string
+  fenceOffSince?: string
   severity?: string
   source_label?: string
   source_type?: string | null
@@ -132,7 +135,8 @@ self.addEventListener('notificationclick', (event) => {
 
 self.addEventListener('notificationclose', (event) => {
   // Dismissing the fence rearm notification counts as "Not Now"
-  if (event.notification.tag === 'argus-fence-rearm') {
+  const data = event.notification.data as NotificationData | undefined
+  if (data?.kind === 'fence-off-reminder' || event.notification.tag === 'argus-fence-rearm') {
     self.clients.matchAll({ type: 'window', includeUncontrolled: true })
       .then((clients) => {
         for (const client of clients) {

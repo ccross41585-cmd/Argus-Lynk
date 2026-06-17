@@ -58,6 +58,92 @@ type FreezerTrendPoint = {
   timestamp: string
 }
 
+const FENCE_OFF_REMINDER_DELAY_MS = 20 * 60 * 1000
+const FENCE_OFF_REMINDER_STORAGE_PREFIX = 'argus-fence-off-reminder'
+
+type FenceOffReminderState = {
+  fence_off_since: string
+  fence_off_reminder_sent: boolean
+  fence_off_reminder_sent_at: string | null
+}
+
+type FencePhysicalState = {
+  confirmedState: 'ON' | 'OFF' | 'UNKNOWN'
+  auxRaw: string
+  contactorFeedback: string
+  commandStatus: string
+  isFresh: boolean
+  isChecking: boolean
+  isPhysicallyOff: boolean
+  isPhysicallyOn: boolean
+}
+
+function fenceReminderStorageKey(deviceId: string): string {
+  return `${FENCE_OFF_REMINDER_STORAGE_PREFIX}:${deviceId}`
+}
+
+function readFenceReminderState(deviceId: string): FenceOffReminderState | null {
+  try {
+    const raw = window.localStorage.getItem(fenceReminderStorageKey(deviceId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<FenceOffReminderState>
+    if (!parsed.fence_off_since || typeof parsed.fence_off_since !== 'string') return null
+    return {
+      fence_off_since: parsed.fence_off_since,
+      fence_off_reminder_sent: Boolean(parsed.fence_off_reminder_sent),
+      fence_off_reminder_sent_at: typeof parsed.fence_off_reminder_sent_at === 'string'
+        ? parsed.fence_off_reminder_sent_at
+        : null,
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeFenceReminderState(deviceId: string, state: FenceOffReminderState): void {
+  try {
+    window.localStorage.setItem(fenceReminderStorageKey(deviceId), JSON.stringify(state))
+  } catch {
+    // best-effort only
+  }
+}
+
+function clearFenceReminderState(deviceId: string): void {
+  try {
+    window.localStorage.removeItem(fenceReminderStorageKey(deviceId))
+  } catch {
+    // best-effort only
+  }
+}
+
+function getFencePhysicalState(device?: DashboardDevice | null, commandStatusHint = ''): FencePhysicalState {
+  const confirmedRaw = String(
+    device?.confirmed_state
+    ?? device?.metadata.confirmed_state
+    ?? device?.metadata.relay_feedback
+    ?? '',
+  ).toUpperCase()
+  const auxRaw = String(device?.metadata.aux_raw ?? '').toUpperCase()
+  const contactorFeedback = String(device?.metadata.contactor_feedback ?? confirmedRaw).toUpperCase()
+  const commandStatus = String(device?.metadata.command_status ?? commandStatusHint ?? 'idle').toLowerCase()
+  const isFresh = device ? getDeviceOnlineStatus(device).online : false
+
+  const isChecking = ['pending', 'sent', 'gateway_received', 'sent_to_node', 'acknowledged', 'node_acknowledged', 'verifying'].includes(commandStatus)
+  const isPhysicallyOff = confirmedRaw === 'OFF' && auxRaw === 'AUX_LOW' && ['OPEN', 'OFF'].includes(contactorFeedback)
+  const isPhysicallyOn = confirmedRaw === 'ON' && auxRaw === 'AUX_HIGH' && ['CONFIRMED', 'STUCK_ON', 'ON'].includes(contactorFeedback)
+
+  return {
+    confirmedState: confirmedRaw === 'ON' ? 'ON' : confirmedRaw === 'OFF' ? 'OFF' : 'UNKNOWN',
+    auxRaw,
+    contactorFeedback,
+    commandStatus,
+    isFresh,
+    isChecking,
+    isPhysicallyOff,
+    isPhysicallyOn,
+  }
+}
+
 type FreezerTempRow = {
   temperature_f: number
   created_at: string
@@ -171,10 +257,8 @@ export function DashboardPage() {
   const [currentTime, setCurrentTime] = useState(() => new Date())
   const [liveWeather, setLiveWeather] = useState<LiveWeather | null>(null)
   const timersRef = useRef<number[]>([])
-  const fencePowerRef = useRef<'ON' | 'OFF' | null>(null)
   const rearmSuppressedRef = useRef(false)
   const rearmCycledRef = useRef(false)
-  const rearmTimerRef = useRef<number | null>(null)
   const commandStatusUnsubRef = useRef<(() => void) | null>(null)
   const commandTimeoutTimersRef = useRef<number[]>([])
   const fenceCommandHardTimeoutRef = useRef<number | null>(null)
@@ -184,6 +268,7 @@ export function DashboardPage() {
   const activeFenceDeviceIdRef = useRef<string | null>(null)
   const activeFenceDesiredStateRef = useRef<'ON' | 'OFF' | null>(null)
   const fencePendingStateRef = useRef(false)
+  const fenceReminderLogRef = useRef<string | null>(null)
 
   useEffect(() => {
     let isActive = true
@@ -374,7 +459,6 @@ export function DashboardPage() {
       commandTimeoutTimersRef.current.forEach((t) => window.clearTimeout(t))
       if (fenceCommandHardTimeoutRef.current !== null) window.clearTimeout(fenceCommandHardTimeoutRef.current)
       if (fenceAutoCloseTimerRef.current !== null) window.clearTimeout(fenceAutoCloseTimerRef.current)
-      if (rearmTimerRef.current !== null) window.clearTimeout(rearmTimerRef.current)
     }
   }, [])
 
@@ -398,40 +482,91 @@ export function DashboardPage() {
     }
   }, [devices])
 
-  // Detect fence ON→OFF transitions and schedule a 1-minute rearm reminder.
+  // Detect fence physical OFF continuity and send exactly one reminder after 20 minutes.
   useEffect(() => {
-    if (!overview) return
-    const current = overview.fenceLine.chargerPower === 'ON' ? 'ON' as const : 'OFF' as const
-    const prev = fencePowerRef.current
-    fencePowerRef.current = current
-    if (prev === null) return // initial load — no transition yet
+    const fenceDevice = devices.find((device) => device.type === 'fence')
+    if (!fenceDevice) return
 
-    if (current === 'ON' && prev === 'OFF') {
-      // Fence was armed — cancel any pending reminder
-      if (rearmTimerRef.current !== null) {
-        window.clearTimeout(rearmTimerRef.current)
-        rearmTimerRef.current = null
+    const physical = getFencePhysicalState(fenceDevice, overview?.fenceLine.commandStatus ?? 'idle')
+    const deviceId = fenceDevice.id
+    const nowIso = new Date().toISOString()
+    const cached = readFenceReminderState(deviceId)
+    const storedSince = fenceDevice.metadata.fence_off_since ?? cached?.fence_off_since ?? null
+    const reminderSent = Boolean(fenceDevice.metadata.fence_off_reminder_sent ?? cached?.fence_off_reminder_sent ?? false)
+    const reminderSentAt = fenceDevice.metadata.fence_off_reminder_sent_at ?? cached?.fence_off_reminder_sent_at ?? null
+
+    const stateSnapshot = JSON.stringify({
+      deviceId,
+      confirmedState: physical.confirmedState,
+      auxRaw: physical.auxRaw,
+      contactorFeedback: physical.contactorFeedback,
+      commandStatus: physical.commandStatus,
+      isFresh: physical.isFresh,
+      storedSince,
+      reminderSent,
+      reminderSentAt,
+    })
+    if (stateSnapshot === fenceReminderLogRef.current) return
+    fenceReminderLogRef.current = stateSnapshot
+
+    let fenceOffSince = typeof storedSince === 'string' && storedSince.trim().length > 0 ? storedSince : null
+    let fenceOffReminderSent = reminderSent
+    let fenceOffReminderSentAt = typeof reminderSentAt === 'string' && reminderSentAt.trim().length > 0 ? reminderSentAt : null
+    let action = 'no_action'
+
+    if (physical.isFresh && physical.isChecking) {
+      action = 'suppress_command_checking'
+    } else if (!physical.isFresh) {
+      action = 'skip_stale_device'
+    } else if (physical.isPhysicallyOn) {
+      fenceOffSince = null
+      fenceOffReminderSent = false
+      fenceOffReminderSentAt = null
+      clearFenceReminderState(deviceId)
+      action = 'cleared_on'
+    } else if (physical.isPhysicallyOff) {
+      if (!fenceOffSince) {
+        fenceOffSince = nowIso
+        fenceOffReminderSent = false
+        fenceOffReminderSentAt = null
+        writeFenceReminderState(deviceId, {
+          fence_off_since: fenceOffSince,
+          fence_off_reminder_sent: false,
+          fence_off_reminder_sent_at: null,
+        })
+        action = 'armed_off_timer'
+      } else {
+        const elapsedMs = Date.now() - new Date(fenceOffSince).getTime()
+        if (!fenceOffReminderSent && elapsedMs >= FENCE_OFF_REMINDER_DELAY_MS) {
+          fenceOffReminderSent = true
+          fenceOffReminderSentAt = nowIso
+          writeFenceReminderState(deviceId, {
+            fence_off_since: fenceOffSince,
+            fence_off_reminder_sent: true,
+            fence_off_reminder_sent_at: fenceOffReminderSentAt,
+          })
+          action = 'reminder_sent'
+          void showRearmNotification(deviceId, fenceOffSince)
+        } else {
+          action = 'waiting_for_delay'
+        }
       }
-      // Track that the user rearmed after saying "Not Now"
-      if (rearmSuppressedRef.current) rearmCycledRef.current = true
+    } else {
+      action = 'no_physical_off_truth'
     }
 
-    if (current === 'OFF' && prev === 'ON') {
-      // Fence just turned off
-      if (rearmCycledRef.current) {
-        // They manually rearmed then turned off again — reset suppression
-        rearmSuppressedRef.current = false
-        rearmCycledRef.current = false
-      }
-      if (!rearmSuppressedRef.current) {
-        // Schedule the reminder for 1 minute of being off
-        rearmTimerRef.current = window.setTimeout(() => {
-          rearmTimerRef.current = null
-          void showRearmNotification()
-        }, 60_000)
-      }
-    }
-  }, [overview])
+    const elapsedMs = fenceOffSince ? Date.now() - new Date(fenceOffSince).getTime() : 0
+    console.log('[FENCE OFF REMINDER]', {
+      device_id: deviceId,
+      confirmed_state: physical.confirmedState,
+      aux_raw: physical.auxRaw,
+      contactor_feedback: physical.contactorFeedback,
+      fence_off_since: fenceOffSince,
+      elapsed_ms: fenceOffSince ? elapsedMs : null,
+      reminder_sent: fenceOffReminderSent,
+      action,
+    })
+  }, [devices, currentTime, overview?.fenceLine.commandStatus])
 
   const activeAlerts = useMemo(() => alerts.filter((a) => !a.resolved_at), [alerts])
 
@@ -1156,17 +1291,18 @@ export function DashboardPage() {
     }
   }
 
-  async function showRearmNotification() {
+  async function showRearmNotification(deviceId: string, fenceOffSince: string) {
     if (!('serviceWorker' in navigator) || Notification.permission !== 'granted') return
     const reg = await navigator.serviceWorker.getRegistration('/')
     if (!reg) return
+    const dedupeKey = `fence_off_reminder:${deviceId}:${fenceOffSince}`
     await reg.showNotification('Fence Reminder ⚡', {
-      body: 'The fence has been off for 1 minute. Would you like to arm it now?',
+      body: 'The fence has been off for 20 minutes. Would you like to arm it now?',
       icon: '/app-icon2.png',
       badge: '/app-icon2.png',
-      tag: 'argus-fence-rearm',
+      tag: dedupeKey,
       requireInteraction: true,
-      data: { url: '/' },
+      data: { url: '/', kind: 'fence-off-reminder', dedupeKey, deviceId, fenceOffSince },
       actions: [
         { action: 'arm-fence', title: 'Arm Now' },
         { action: 'dismiss-fence', title: 'Not Now' },
