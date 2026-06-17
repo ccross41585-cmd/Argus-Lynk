@@ -327,7 +327,11 @@ async function withFreezerMetadata(rows: Device[]): Promise<Device[]> {
 
 export function mapDevice(row: Device): DashboardDevice {
   const type = toDashboardType(String(row.device_type ?? row.type ?? ''))
-  const connection = getDeviceOnlineStatus(row)
+  const isFreezerLynk = type === 'freezer'
+  // Freezer Lynk devices are managed by freezer-offline-monitor which sets
+  // devices.online authoritatively. Trust it directly instead of re-computing
+  // from last_seen timestamp (which would always show offline between sleep cycles).
+  const connection = getDeviceOnlineStatus({ ...row, trustOnlineField: isFreezerLynk })
   const baseMeta = type === 'fence' ? fenceMeta(row)
     : ((row.metadata ?? {}) as Record<string, string | number | boolean | null | number[]>)
 
