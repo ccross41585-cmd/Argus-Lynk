@@ -34,10 +34,11 @@ export function getDeviceOnlineStatus(device: DeviceOnlineInput): DeviceOnlineSt
     null
 
   const lastSeenMs = parseTimestampMs(lastSeenRaw)
+  const hasFreshSeen = lastSeenMs > 0 && now - lastSeenMs < ONLINE_TIMEOUT_MS
 
   const online =
-    Boolean(device.online) ||
-    (lastSeenMs > 0 && now - lastSeenMs < ONLINE_TIMEOUT_MS)
+    hasFreshSeen ||
+    (lastSeenMs <= 0 && Boolean(device.online))
 
   return {
     online,

@@ -263,10 +263,22 @@ async function bestEffortSendPushForAlert(
   const endpoint = Deno.env.get('PUSH_NOTIFY_FUNCTION_URL')
   if (!endpoint) return
 
+  const functionAuthToken = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+    ?? Deno.env.get('SUPABASE_ANON_KEY')
+    ?? ''
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (functionAuthToken.trim().length > 0) {
+    headers.Authorization = `Bearer ${functionAuthToken}`
+    headers.apikey = functionAuthToken
+  }
+
   try {
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         alertId,
         targetUserId: options.targetUserId ?? undefined,
