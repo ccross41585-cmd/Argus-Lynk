@@ -11,8 +11,7 @@ type FreezerQuickDetailSheetProps = {
   currentTempLabel: string
   statusLabel: 'Normal' | 'Warning' | 'Alarm' | 'Offline'
   lastReportLabel: string
-  batteryLabel: string
-  connectionLabel: string
+  healthLabel: 'Healthy' | 'Delayed' | 'Missing'
   connectionTypeLabel: string
   range: FreezerRange
   customStart: string
@@ -99,8 +98,7 @@ export function FreezerQuickDetailSheet({
   currentTempLabel,
   statusLabel,
   lastReportLabel,
-  batteryLabel,
-  connectionLabel,
+  healthLabel,
   connectionTypeLabel,
   range,
   customStart,
@@ -146,8 +144,16 @@ export function FreezerQuickDetailSheet({
           <div className="data-row"><span className="label">Current Temperature</span><strong>{currentTempLabel}</strong></div>
           <div className="data-row"><span className="label">Status</span><strong>{statusLabel}</strong></div>
           <div className="data-row"><span className="label">Last Report</span><strong>{lastReportLabel}</strong></div>
-          <div className="data-row"><span className="label">Battery</span><strong>{batteryLabel}</strong></div>
-          <div className="data-row"><span className="label">Connection</span><strong>{connectionLabel}</strong></div>
+          <div className="data-row">
+            <span className="label">Connection Health</span>
+            <strong 
+              style={{
+                color: healthLabel === 'Healthy' ? '#10b981' : healthLabel === 'Delayed' ? '#f59e0b' : '#ef4444'
+              }}
+            >
+              {healthLabel}
+            </strong>
+          </div>
           <div className="data-row"><span className="label">Connection Type</span><strong>{connectionTypeLabel}</strong></div>
         </div>
 

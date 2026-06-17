@@ -263,17 +263,30 @@ async function bestEffortSendPushForAlert(
   const endpoint = Deno.env.get('PUSH_NOTIFY_FUNCTION_URL')
   if (!endpoint) return
 
-  const functionAuthToken = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  const functionAuthToken =
+    Deno.env.get('PUSH_NOTIFY_AUTH_TOKEN')
+    ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
     ?? Deno.env.get('SUPABASE_ANON_KEY')
+    ?? Deno.env.get('SERVICE_ROLE_KEY')
+    ?? Deno.env.get('ANON_KEY')
     ?? ''
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
   if (functionAuthToken.trim().length > 0) {
-    headers.Authorization = `Bearer ${functionAuthToken}`
+    headers.Authorization = `Bearer ${functionAuthToken.trim()}`
+    headers.authorization = `Bearer ${functionAuthToken.trim()}`
     headers.apikey = functionAuthToken
+  } else {
+    console.error('Push notification auth token missing for freezer-telemetry -> send-push-notification call')
   }
+
+  console.log('Dispatching push notification', {
+    endpoint,
+    hasAuthorizationHeader: Boolean(headers.Authorization || headers.authorization),
+    hasApiKeyHeader: Boolean(headers.apikey),
+  })
 
   try {
     const response = await fetch(endpoint, {

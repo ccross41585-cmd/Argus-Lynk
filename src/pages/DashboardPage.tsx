@@ -1216,22 +1216,19 @@ export function DashboardPage() {
     ? `${new Date(fieldNodeDevice.last_seen).toLocaleTimeString()} (${getDeviceOnlineStatus(fieldNodeDevice).label})`
     : 'Unknown'
   const fieldCardState = overview.fenceLine.chargerPower === 'ON' ? 'SECURE / ON' : 'OFF (Manual)'
-  const freezerConnection = freezerDevice
-    ? getDeviceOnlineStatus(freezerDevice).label
-    : 'OFFLINE'
+  const freezerConnectionHealth = (() => {
+    if (!freezerDevice) return 'Missing'
+    const health = String(freezerDevice.metadata.connection_health ?? '').toLowerCase()
+    if (health === 'healthy') return 'Healthy'
+    if (health === 'delayed') return 'Delayed'
+    return 'Missing'
+  })() as 'Healthy' | 'Delayed' | 'Missing'
   const freezerCurrentTemp = (() => {
     if (!freezerDevice) return '--'
     const existing = String(freezerDevice.metadata.temperature ?? '').trim()
     if (existing) return existing
     const numeric = asNumber(freezerDevice.metadata.temperature_f)
     return numeric === null ? '--' : `${numeric.toFixed(1)}F`
-  })()
-  const freezerBattery = (() => {
-    if (!freezerDevice) return 'n/a'
-    const pct = asNumber(freezerDevice.metadata.battery_percent)
-    if (pct !== null) return `${pct.toFixed(0)}%`
-    const volts = asNumber(freezerDevice.metadata.battery_voltage)
-    return volts !== null ? `${volts.toFixed(2)}V` : 'n/a'
   })()
   const freezerLastReport = freezerDevice?.metadata.updated
     ? new Date(String(freezerDevice.metadata.updated)).toLocaleString()
@@ -1383,8 +1380,7 @@ export function DashboardPage() {
         currentTempLabel={freezerCurrentTemp}
         statusLabel={freezerStatusLabel(freezerDevice)}
         lastReportLabel={freezerLastReport}
-        batteryLabel={freezerBattery}
-        connectionLabel={freezerConnection}
+        healthLabel={freezerConnectionHealth}
         connectionTypeLabel={freezerConnectionType}
         range={freezerRange}
         customStart={freezerCustomStart}

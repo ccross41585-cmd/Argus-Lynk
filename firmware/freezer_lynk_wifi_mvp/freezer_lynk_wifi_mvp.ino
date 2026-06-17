@@ -37,7 +37,7 @@ const int SETUP_BUTTON_PIN = 0;
 
 const bool DEBUG_MODE = false;
 const unsigned long DEBUG_INTERVAL_SECONDS = 10UL;
-const unsigned long PRODUCTION_INTERVAL_SECONDS = 300UL;
+const unsigned long PRODUCTION_INTERVAL_SECONDS = 480UL;  // 8 minutes
 const unsigned long ALARM_INTERVAL_SECONDS = 60UL;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000UL;
 const uint16_t HTTP_TIMEOUT_MS = 12000;
