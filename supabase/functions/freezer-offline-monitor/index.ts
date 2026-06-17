@@ -157,19 +157,9 @@ async function bestEffortSendPushForAlert(alertId: string): Promise<void> {
   const supabaseUrl = Deno.env.get('SUPABASE_URL')?.trim() ?? ''
   const fallbackEndpoint = supabaseUrl ? `${supabaseUrl}/functions/v1/send-push-notification` : ''
 
-  let endpoint = configuredEndpoint
-  try {
-    if (configuredEndpoint) {
-      const parsed = new URL(configuredEndpoint)
-      if (!parsed.pathname.includes('/functions/v1/')) {
-        console.error('PUSH_NOTIFY_FUNCTION_URL is missing /functions/v1 path; using fallback endpoint')
-        endpoint = fallbackEndpoint
-      }
-    }
-  } catch {
-    console.error('PUSH_NOTIFY_FUNCTION_URL is invalid URL; using fallback endpoint')
-    endpoint = fallbackEndpoint
-  }
+  // Always prefer the canonical project-local edge function URL to avoid
+  // stale/misconfigured PUSH_NOTIFY_FUNCTION_URL values pointing elsewhere.
+  const endpoint = fallbackEndpoint || configuredEndpoint
 
   if (!endpoint) {
     console.error('Push notification endpoint missing for freezer-offline-monitor')
