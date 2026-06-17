@@ -260,8 +260,28 @@ async function bestEffortSendPushForAlert(
   alertId: string,
   options: PushDispatchOptions = {},
 ): Promise<void> {
-  const endpoint = Deno.env.get('PUSH_NOTIFY_FUNCTION_URL')
-  if (!endpoint) return
+  const configuredEndpoint = Deno.env.get('PUSH_NOTIFY_FUNCTION_URL')?.trim() ?? ''
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')?.trim() ?? ''
+  const fallbackEndpoint = supabaseUrl ? `${supabaseUrl}/functions/v1/send-push-notification` : ''
+
+  let endpoint = configuredEndpoint
+  try {
+    if (configuredEndpoint) {
+      const parsed = new URL(configuredEndpoint)
+      if (!parsed.pathname.includes('/functions/v1/')) {
+        console.error('PUSH_NOTIFY_FUNCTION_URL is missing /functions/v1 path; using fallback endpoint')
+        endpoint = fallbackEndpoint
+      }
+    }
+  } catch {
+    console.error('PUSH_NOTIFY_FUNCTION_URL is invalid URL; using fallback endpoint')
+    endpoint = fallbackEndpoint
+  }
+
+  if (!endpoint) {
+    console.error('Push notification endpoint missing for freezer-telemetry')
+    return
+  }
 
   const functionAuthToken =
     Deno.env.get('PUSH_NOTIFY_AUTH_TOKEN')
@@ -284,6 +304,8 @@ async function bestEffortSendPushForAlert(
 
   console.log('Dispatching push notification', {
     endpoint,
+    configuredEndpoint,
+    fallbackEndpoint,
     hasAuthorizationHeader: Boolean(headers.Authorization || headers.authorization),
     hasApiKeyHeader: Boolean(headers.apikey),
   })
@@ -490,7 +512,11 @@ serve(async (req: Request) => {
     console.log('Freezer warning transition')
 
     if (existingActiveAlert) {
-      console.log('Push notification skipped - duplicate/active alert exists')
+      console.log('Push notification skipped - duplicate/active alert exists', {
+        severity: existingActiveAlert.severity,
+        title: existingActiveAlert.title,
+        alert_id: existingActiveAlert.id,
+      })
     } else {
       const { data: warningRow, error: warningErr } = await supabase
         .from('alerts')
@@ -523,7 +549,11 @@ serve(async (req: Request) => {
 
     if (existingActiveAlert && existingActiveAlert.severity === 'critical') {
       createdAlarmId = existingActiveAlert.id
-      console.log('Push notification skipped - duplicate/active alert exists')
+      console.log('Push notification skipped - duplicate/active alert exists', {
+        severity: existingActiveAlert.severity,
+        title: existingActiveAlert.title,
+        alert_id: existingActiveAlert.id,
+      })
     } else {
       const { data: alertRow, error: alertErr } = await supabase
         .from('alerts')
