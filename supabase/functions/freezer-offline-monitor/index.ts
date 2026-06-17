@@ -179,8 +179,7 @@ async function bestEffortSendPushForAlert(alertId: string): Promise<void> {
   }
   if (functionAuthToken.trim().length > 0) {
     headers.Authorization = `Bearer ${functionAuthToken.trim()}`
-    headers.authorization = `Bearer ${functionAuthToken.trim()}`
-    headers.apikey = functionAuthToken
+    headers.apikey = functionAuthToken.trim()
   } else {
     console.error('Push notification auth token missing for freezer-offline-monitor -> send-push-notification call')
   }
@@ -189,7 +188,7 @@ async function bestEffortSendPushForAlert(alertId: string): Promise<void> {
     endpoint,
     configuredEndpoint,
     fallbackEndpoint,
-    hasAuthorizationHeader: Boolean(headers.Authorization || headers.authorization),
+    hasAuthorizationHeader: Boolean(headers.Authorization),
     hasApiKeyHeader: Boolean(headers.apikey),
   })
 
