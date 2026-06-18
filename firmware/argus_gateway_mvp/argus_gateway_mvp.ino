@@ -20,7 +20,7 @@ const char* GATEWAY_ID = "home-base-001";
 //   devices.target_firmware_version column in Supabase to drive staged rollout,
 //   update-available notifications, and rollback tracking.  The gateway OTA
 //   hostname is argus-gateway-<GATEWAY_ID> (e.g. argus-gateway-home-base-001).
-const char* DEVICE_FIRMWARE_VERSION = "1.1.4";
+const char* DEVICE_FIRMWARE_VERSION = "1.1.5";
 const char* DEVICE_BUILD_DATE       = "2026-06-18";
 const char* DEVICE_ROLE             = "gateway";
 const bool  OTA_SUPPORTED           = true;
@@ -499,10 +499,18 @@ bool sendJsonPatch(const String& url, const String& payload, const String& conte
   return true;
 }
 
+bool isSchemaMissingColumnError(const String& columnName = "") {
+  if (lastHttpStatusCode != 400 || lastHttpResponseBody.indexOf("PGRST204") < 0) {
+    return false;
+  }
+  if (columnName.length() == 0) {
+    return true;
+  }
+  return lastHttpResponseBody.indexOf(columnName) >= 0;
+}
+
 bool isMissingFailureReasonColumnError() {
-  return lastHttpStatusCode == 400
-    && lastHttpResponseBody.indexOf("PGRST204") >= 0
-    && lastHttpResponseBody.indexOf("failure_reason") >= 0;
+  return isSchemaMissingColumnError("failure_reason");
 }
 
 bool updateDeviceCommandStatus(const String& deviceId,
@@ -899,16 +907,16 @@ bool markCommandLifecycleStatus(const PendingCommand& command,
     return true;
   }
 
-  if (failureReason.length() == 0 || !isMissingFailureReasonColumnError()) {
+  // Schema compatibility fallback: old DB schemas may not have lifecycle
+  // timestamp columns (sent_to_node_at, node_acknowledged_at, verified_at)
+  // and/or failure_reason.
+  if (!isSchemaMissingColumnError()) {
     return false;
   }
 
-  Serial.println("[SCHEMA COMPAT] device_commands.failure_reason missing. Retrying lifecycle patch without failure_reason.");
-  DynamicJsonDocument fallbackBody(512);
+  Serial.println("[SCHEMA COMPAT] lifecycle column missing. Retrying lifecycle patch with status-only payload.");
+  DynamicJsonDocument fallbackBody(128);
   fallbackBody["status"] = status;
-  if (timestampField.length() > 0 && nowTs.length() > 0) {
-    fallbackBody[timestampField] = nowTs;
-  }
   String fallbackPayload;
   serializeJson(fallbackBody, fallbackPayload);
   return sendJsonPatch(url, fallbackPayload, "PATCH device_commands lifecycle status (schema fallback)");
