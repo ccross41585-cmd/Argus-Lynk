@@ -35,6 +35,7 @@ import { getDeviceOnlineStatus } from '../lib/deviceOnlineStatus'
 import { isSupabaseConfigured, supabase } from '../lib/supabase'
 import { loadUserProfile } from '../lib/userProfile'
 import { fetchWeather, type LiveWeather } from '../lib/weather'
+import { subscribeToPushNotifications } from '../services/pushNotifications'
 import type {
   AlertRecord,
   CommandRecord,
@@ -338,6 +339,17 @@ export function DashboardPage() {
       window.removeEventListener('offline', updateNetworkState)
       conn?.removeEventListener?.('change', updateNetworkState)
     }
+  }, [])
+
+  useEffect(() => {
+    async function syncPushSubscription() {
+      if (!isSupabaseConfigured) return
+      const userId = (await supabase?.auth.getUser())?.data?.user?.id
+      if (!userId) return
+      // Automatically sync any new push subscription from permission grant
+      await subscribeToPushNotifications(userId, 'default-tenant')
+    }
+    void syncPushSubscription()
   }, [])
 
   useEffect(() => {
