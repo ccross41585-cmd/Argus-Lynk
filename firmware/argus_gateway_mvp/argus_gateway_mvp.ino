@@ -1141,6 +1141,13 @@ AckPacket waitForAck(const PendingCommand& command) {
     loraOk = true;
     lastRssi = radio.getRSSI();
     lastSnr = radio.getSNR();
+
+    // Update device metadata immediately so dashboard sees fresh aux/contact state in realtime
+    // before verification completes or status updates. This enables early confirmation.
+    if (command.deviceId.length() > 0) {
+      updateDeviceContactorFeedback(command.deviceId, packetContactorFeedback, packetAuxRaw, "", false);
+    }
+
     return ack;
   }
 

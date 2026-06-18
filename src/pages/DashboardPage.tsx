@@ -1077,7 +1077,7 @@ export function DashboardPage() {
         }
       }
       finalizeFenceCommand('timeout', target, 'Command status timed out. Check device state.')
-    }, 45_000)
+    }, 15_000)
 
     const t8 = window.setTimeout(() => {
       if (!statusSeen.has('gateway_received')) {
