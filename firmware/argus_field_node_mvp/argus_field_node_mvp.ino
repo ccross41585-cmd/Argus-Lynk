@@ -32,7 +32,7 @@ const String NETWORK_KEY = "farm123";
 const String NODE_ID = "fence1";
 
 // ── Firmware identity ────────────────────────────────────────────────────────────────────
-const char* DEVICE_FIRMWARE_VERSION = "1.1.1";
+const char* DEVICE_FIRMWARE_VERSION = "1.1.2";
 const char* DEVICE_BUILD_DATE       = "2026-06-13";
 const char* DEVICE_ROLE             = "field_node";
 #if FIELD_NODE_OTA_AVAILABLE
@@ -423,6 +423,10 @@ void sendAck(const String& sequence) {
     Serial.printf("ACK transmit failed. RadioLib code: %d\n", state);
     return;
   }
+
+  // Send a follow-up HB quickly after ACK so the gateway gets another fresh
+  // aux/contact sample without waiting for the normal 30s interval.
+  immediateHeartbeatNeeded = true;
 
   state = radio.startReceive();
   if (state != RADIOLIB_ERR_NONE) {

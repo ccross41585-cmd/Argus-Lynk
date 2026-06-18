@@ -20,7 +20,7 @@ const char* GATEWAY_ID = "home-base-001";
 //   devices.target_firmware_version column in Supabase to drive staged rollout,
 //   update-available notifications, and rollback tracking.  The gateway OTA
 //   hostname is argus-gateway-<GATEWAY_ID> (e.g. argus-gateway-home-base-001).
-const char* DEVICE_FIRMWARE_VERSION = "1.1.2";
+const char* DEVICE_FIRMWARE_VERSION = "1.1.3";
 const char* DEVICE_BUILD_DATE       = "2026-06-13";
 const char* DEVICE_ROLE             = "gateway";
 const bool  OTA_SUPPORTED           = true;
@@ -141,9 +141,9 @@ const unsigned long OFFLINE_ALERT_MIN_INTERVAL_MS = 30UL * 60UL * 1000UL;  // 30
 // Post-command physical verification window.
 // After an ACK, the gateway waits up to CONTACT_VERIFY_TIMEOUT_MS for contactor
 // feedback that confirms the physical state matches the issued command.
-const unsigned long CONTACT_VERIFY_GRACE_MS    = 800;    // min wait before first check (ms)
-const unsigned long CONTACT_VERIFY_TIMEOUT_MS  = 8000;   // max window before failure (ms)
-const unsigned long CONTACT_VERIFY_RETRY_MS    = 1500;   // STATUS retry interval (ms)
+const unsigned long CONTACT_VERIFY_GRACE_MS    = 500;    // min wait before first check (ms)
+const unsigned long CONTACT_VERIFY_TIMEOUT_MS  = 5000;   // max window before failure (ms)
+const unsigned long CONTACT_VERIFY_RETRY_MS    = 750;    // STATUS retry interval (ms)
 const int           CONTACT_VERIFY_MAX_RETRIES = 4;      // max STATUS retries in window
 
 struct TransmitResult {
@@ -1072,10 +1072,8 @@ AckPacket waitForAck(const PendingCommand& command) {
     }
 
     packet = trimCopy(packet);
-    if (DEBUG_VERBOSE) {
-      Serial.print("ACK packet received: ");
-      Serial.println(packet);
-    }
+    Serial.print("[ACK RECEIVED] ");
+    Serial.println(packet);
 
     String packetType = packetPart(packet, 0);
     String packetKey = packetPart(packet, 1);
@@ -1085,7 +1083,21 @@ AckPacket waitForAck(const PendingCommand& command) {
     String packetRelayState        = packetPart(packet, 5);  // ON/OFF output pin state
     String packetAuxRaw            = packetPart(packet, 6);  // AUX_LOW or AUX_HIGH
     String packetContactorFeedback = packetPart(packet, 7);
-    String packetPhysicalState     = packetPart(packet, 8);  // "on"/"off" (field node >= 1.1.1)
+    String packetPhysicalState     = packetPart(packet, 8);  // "on"/"off"
+    String packetFirmwareVersion   = packetPart(packet, 9);
+    String packetWifiConnected     = packetPart(packet, 10);
+
+    if (DEBUG_VERBOSE) {
+      Serial.printf("[ACK PARSE] seq=%s cmd=%s relay=%s aux=%s fb=%s confirmed=%s fw=%s wifi=%s\n",
+        packetSequence.c_str(),
+        packetAction.c_str(),
+        packetRelayState.c_str(),
+        packetAuxRaw.c_str(),
+        packetContactorFeedback.c_str(),
+        packetPhysicalState.c_str(),
+        packetFirmwareVersion.c_str(),
+        packetWifiConnected.c_str());
+    }
 
     if (packetType != "ACK") {
       logVerbose("ACK ignored because type is not ACK.");
@@ -1303,6 +1315,8 @@ void processPendingCommand(const PendingCommand& command) {
     }
 
     if (ackVerified) {
+      Serial.printf("[ACK VERIFY FAST PATH] command_id=%s expected=%s aux=%s result=verified\n",
+        command.id.c_str(), expectedState.c_str(), ack.auxRaw.c_str());
       String nowTs = timestampNow();
       markCommandLifecycleStatus(command, "verified", "verified_at");
       updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
