@@ -795,15 +795,13 @@ export function DashboardPage() {
     const fenceDevice = devices.find((d) => d.id === trackedDeviceId)
     if (!fenceDevice) return
 
-    const confirmedRaw = String(
-      fenceDevice.confirmed_state
-      ?? fenceDevice.metadata.confirmed_state
-      ?? fenceDevice.metadata.charger_power
-      ?? '',
-    ).toUpperCase()
+    const state = getFencePhysicalState(fenceDevice, latestCommand?.status ?? '')
+    const commandStatus = latestCommand?.status ?? 'pending'
 
-    const confirmedState = confirmedRaw.includes('ON') ? 'ON' : confirmedRaw.includes('OFF') ? 'OFF' : null
-    if (latestCommand?.status === 'verified' && confirmedState === target) {
+    const auxConfirmed = (target === 'ON' && state.auxRaw === 'AUX_HIGH')
+      || (target === 'OFF' && state.auxRaw === 'AUX_LOW')
+
+    if (commandStatus === 'verified' && auxConfirmed) {
       finalizeFenceCommand('success', target, `Confirmed ${target}`)
     }
   }, [devices, latestCommand?.status])
@@ -907,31 +905,39 @@ export function DashboardPage() {
     clearFenceCommandRefs()
   }
 
-  function lifecycleMessage(status: string, target: 'ON' | 'OFF'): BannerState {
+  function lifecycleMessage(status: string, target: 'ON' | 'OFF', failureReason?: string | null): BannerState {
     if (status === 'pending') return { tone: 'info', message: 'Sending command...' }
     if (status === 'gateway_received') return { tone: 'info', message: 'Command queued. Waiting for gateway...' }
     if (status === 'sent_to_node') return { tone: 'info', message: 'Sent to Field Lynk...' }
     if (status === 'node_acknowledged' || status === 'acknowledged') return { tone: 'info', message: 'Field Lynk acknowledged...' }
     if (status === 'verified') return { tone: 'success', message: `${target} confirmed.` }
+    if (status === 'verifying') return { tone: 'info', message: 'Waiting for aux contact confirmation...' }
     if (status === 'completed') return { tone: 'info', message: 'Command completed. Waiting for physical verification...' }
     if (status === 'gateway_timeout') return { tone: 'danger', message: 'Gateway timed out while sending command.' }
     if (status === 'node_no_ack') return { tone: 'danger', message: 'Field Lynk did not acknowledge command.' }
+    if (status === 'verification_failed' && failureReason === 'aux_missing') {
+      return { tone: 'danger', message: 'Command sent, but aux contact feedback was not received.' }
+    }
     if (status === 'verification_failed') return { tone: 'danger', message: 'Command not physically verified. Please check device status.' }
     if (status === 'expired') return { tone: 'danger', message: 'Command expired before verification.' }
     if (status === 'failed') return { tone: 'danger', message: 'Command failed to complete.' }
     return { tone: 'info', message: 'Sending command...' }
   }
 
-  function lifecycleProgressMessage(status: string, target: 'ON' | 'OFF') {
+  function lifecycleProgressMessage(status: string, target: 'ON' | 'OFF', failureReason?: string | null) {
     if (status === 'pending') return 'Sending command...'
     if (status === 'gateway_received') return 'Command sent'
     if (status === 'sent_to_node') return 'Waiting for confirmation...'
     if (status === 'node_acknowledged' || status === 'acknowledged') return `Field Lynk acknowledged ${target}`
     if (status === 'verified') return `Aux contact confirmed ${target}`
+    if (status === 'verifying') return 'Waiting for aux contact confirmation...'
     if (status === 'completed') return 'Command completed; waiting for physical verification...'
     if (status === 'gateway_timeout') return 'Gateway timed out.'
     if (status === 'node_no_ack') return 'Field Lynk did not acknowledge command.'
     if (status === 'expired') return 'Command expired before verification.'
+    if (status === 'verification_failed' && failureReason === 'aux_missing') {
+      return 'Command sent, but aux contact feedback was not received.'
+    }
     if (status === 'verification_failed' || status === 'failed') return 'Failed to confirm, please check device status.'
     return 'Waiting for command...'
   }
@@ -1039,8 +1045,8 @@ export function DashboardPage() {
     fencePendingStateRef.current = true
 
     setLatestCommand(command)
-    setBanner(lifecycleMessage(command.status, target))
-    setFenceCommandProgress(lifecycleProgressMessage(command.status, target))
+    setBanner(lifecycleMessage(command.status, target, command.failure_reason))
+    setFenceCommandProgress(lifecycleProgressMessage(command.status, target, command.failure_reason))
     setIsFenceCommandSending(true)
 
     const statusSeen = new Set<string>([command.status])
@@ -1066,7 +1072,7 @@ export function DashboardPage() {
     }, 16_000)
     const t24 = window.setTimeout(() => {
       if (!statusSeen.has('verified')) {
-        setBanner({ tone: 'danger', message: 'Command not physically verified. Please check device status.' })
+        setBanner({ tone: 'info', message: 'Waiting for aux contact confirmation...' })
       }
     }, 24_000)
     const tPoll = window.setInterval(async () => {
@@ -1100,15 +1106,15 @@ export function DashboardPage() {
 
       statusSeen.add(next.status)
       setLatestCommand(next)
-      setBanner(lifecycleMessage(next.status, target))
-      setFenceCommandProgress(lifecycleProgressMessage(next.status, target))
+      setBanner(lifecycleMessage(next.status, target, next.failure_reason))
+      setFenceCommandProgress(lifecycleProgressMessage(next.status, target, next.failure_reason))
 
       if (successStatuses.has(next.status)) {
         finalizeFenceCommand('success', target, `Confirmed ${target}`)
         return
       }
       if (failureStatuses.has(next.status)) {
-        finalizeFenceCommand('failed', target, lifecycleMessage(next.status, target).message)
+        finalizeFenceCommand('failed', target, lifecycleMessage(next.status, target, next.failure_reason).message)
       }
     }, 2000)
 
@@ -1118,15 +1124,15 @@ export function DashboardPage() {
       statusSeen.add(next.status)
       activeFenceCommandIdRef.current = next.id
       setLatestCommand(next)
-      setBanner(lifecycleMessage(next.status, target))
-      setFenceCommandProgress(lifecycleProgressMessage(next.status, target))
+      setBanner(lifecycleMessage(next.status, target, next.failure_reason))
+      setFenceCommandProgress(lifecycleProgressMessage(next.status, target, next.failure_reason))
 
       if (successStatuses.has(next.status)) {
         finalizeFenceCommand('success', target, `Confirmed ${target}`)
         return
       }
       if (failureStatuses.has(next.status)) {
-        finalizeFenceCommand('failed', target, lifecycleMessage(next.status, target).message)
+        finalizeFenceCommand('failed', target, lifecycleMessage(next.status, target, next.failure_reason).message)
       }
     })
   }

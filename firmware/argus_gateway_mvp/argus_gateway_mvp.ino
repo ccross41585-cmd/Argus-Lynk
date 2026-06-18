@@ -20,7 +20,7 @@ const char* GATEWAY_ID = "home-base-001";
 //   devices.target_firmware_version column in Supabase to drive staged rollout,
 //   update-available notifications, and rollback tracking.  The gateway OTA
 //   hostname is argus-gateway-<GATEWAY_ID> (e.g. argus-gateway-home-base-001).
-const char* DEVICE_FIRMWARE_VERSION = "1.1.1";
+const char* DEVICE_FIRMWARE_VERSION = "1.1.2";
 const char* DEVICE_BUILD_DATE       = "2026-06-13";
 const char* DEVICE_ROLE             = "gateway";
 const bool  OTA_SUPPORTED           = true;
@@ -1138,17 +1138,19 @@ AckPacket waitForAck(const PendingCommand& command) {
 
 // ── Post-command verification helpers ─────────────────────────────────────────
 
-// Returns true when the physical contactor state matches the issued command.
-bool isCommandVerified(const String& expectedState, const String& fb, const String& auxRaw) {
-  if (expectedState == "on")  return fb == "CONFIRMED" && auxRaw == "AUX_HIGH";
-  if (expectedState == "off") return fb == "OPEN"      && auxRaw == "AUX_LOW";
+// Returns true when AUX contact confirms the issued command.
+// Field Lynk verification is aux-first: feedback alone is never sufficient.
+bool isCommandVerified(const String& expectedState, const String& auxRaw) {
+  if (expectedState == "on")  return auxRaw == "AUX_HIGH";
+  if (expectedState == "off") return auxRaw == "AUX_LOW";
   return false;
 }
 
-// Returns true when the physical state is a definitive mismatch (not just uncertain).
-bool isCommandDefinitelyFailed(const String& expectedState, const String& fb) {
-  if (expectedState == "on"  && fb == "FAILED")   return true;
-  if (expectedState == "off" && fb == "STUCK_ON") return true;
+// Returns true when AUX is present and opposite of the expected state.
+bool isAuxOppositeExpected(const String& expectedState, const String& auxRaw) {
+  if (auxRaw.length() == 0) return false;
+  if (expectedState == "on"  && auxRaw == "AUX_LOW")  return true;
+  if (expectedState == "off" && auxRaw == "AUX_HIGH") return true;
   return false;
 }
 
@@ -1280,48 +1282,43 @@ void processPendingCommand(const PendingCommand& command) {
     Serial.printf("[COMMAND PROGRESS] verifying id=%s\n", command.id.c_str());
     Serial.printf("[ACK] node=%s state=%s aux=%s fb=%s\n",
       NODE_ID.c_str(), ack.confirmedState.c_str(), ack.auxRaw.c_str(), ack.contactorFeedback.c_str());
-    Serial.printf("[VERIFY] checking desired=%s actual=%s fb=%s\n",
-      expectedState.c_str(), ack.auxRaw.c_str(), ack.contactorFeedback.c_str());
+    const bool ackAuxPresent = ack.auxRaw.length() > 0;
+    const bool ackVerified = isCommandVerified(expectedState, ack.auxRaw);
+    const bool ackOpposite = isAuxOppositeExpected(expectedState, ack.auxRaw);
+    const char* ackResult = ackVerified ? "verified" : (ackOpposite ? "opposite_waiting" : "pending");
+    Serial.printf("[AUX VERIFY] desired=%s aux_raw=%s feedback=%s result=%s\n",
+      expectedState.c_str(), ack.auxRaw.c_str(), ack.contactorFeedback.c_str(), ackResult);
 
-    if (isCommandVerified(expectedState, ack.contactorFeedback, ack.auxRaw)) {
-      Serial.println("[VERIFY] success");
+    if (!ackAuxPresent) {
+      Serial.printf("[AUX MISSING] command_id=%s packet=ACK|%s|%s|%s|%s|%s|%s|%s|%s\n",
+        command.id.c_str(),
+        NETWORK_KEY.c_str(),
+        NODE_ID.c_str(),
+        ack.sequence.c_str(),
+        legacyAction.c_str(),
+        ack.relayState.c_str(),
+        ack.auxRaw.c_str(),
+        ack.contactorFeedback.c_str(),
+        ack.physicalState.c_str());
+    }
+
+    if (ackVerified) {
       String nowTs = timestampNow();
       markCommandLifecycleStatus(command, "verified", "verified_at");
       updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
                                     "", false, "verified", "verified", nowTs);
       updateDeviceCommandStatus(command.deviceId, "verified", "verified", nowTs);
-      updateDeviceConfirmedState(command.deviceId, ack.confirmedState, expectedState);
+      updateDeviceConfirmedState(command.deviceId, expectedState, expectedState);
       Serial.printf("[COMMAND VERIFIED] id=%s desired=%s confirmed=%s\n",
-        command.id.c_str(), expectedState.c_str(), ack.confirmedState.c_str());
+        command.id.c_str(), expectedState.c_str(), expectedState.c_str());
       rememberCommandId(command.id);
       Serial.println("Finished command processing, returning to polling");
       return;
     }
 
-    if (isCommandDefinitelyFailed(expectedState, ack.contactorFeedback)) {
-      Serial.printf("[VERIFY] failed (fb=%s)\n", ack.contactorFeedback.c_str());
-      String nowTs = timestampNow();
-      markCommandLifecycleStatus(command, "verification_failed", "failed_at", "aux_feedback_mismatch");
-      updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
-                                    "", false, "verification_failed", "verification_failed", nowTs);
-      updateDeviceCommandStatus(command.deviceId, "verification_failed", "verification_failed", "", nowTs);
-      if (markCommandFailed(command,
-                            "Physical feedback did not match: " + ack.contactorFeedback,
-                            "verification_failed",
-                            "aux_feedback_mismatch")) {
-        rememberCommandId(command.id);
-      }
-      if (lastVerificationAlertCommandId != command.id) {
-        lastVerificationAlertCommandId = command.id;
-        createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
-          "Field Lynk command was sent but physical feedback did not match. Check the fence controller.");
-      }
-      Serial.println("Finished command processing, returning to polling");
-      return;
-    }
-
-    // Contactor feedback uncertain — start post-command verification window.
-    Serial.printf("[VERIFY] retry 1 — entering verification window (fb=%s)\n", ack.contactorFeedback.c_str());
+    // Aux missing/opposite/uncertain — start post-command verification window.
+    Serial.printf("[AUX VERIFY] desired=%s aux_raw=%s feedback=%s result=waiting\n",
+      expectedState.c_str(), ack.auxRaw.c_str(), ack.contactorFeedback.c_str());
     markCommandAcknowledged(command);
     updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
                                   "", false, "verifying", "pending", "");
@@ -1377,11 +1374,13 @@ void checkVerificationWindow() {
       String pNode = packetPart(packet, 2);
       String pFb   = "";
       String pAux  = "";
+      String pRelay = "";
       bool relevant = false;
 
       if (pType == "HB" && pKey == NETWORK_KEY && pNode == NODE_ID) {
-        pFb  = packetPart(packet, 4);
-        pAux = packetPart(packet, 5);
+        pRelay = packetPart(packet, 5);
+        pAux   = packetPart(packet, 6);
+        pFb    = packetPart(packet, 7);
         lastHbReceivedAt     = millis();
         nodeOfflineAlertSent = false;
         lastRssi = radio.getRSSI();
@@ -1391,23 +1390,31 @@ void checkVerificationWindow() {
         // ACK in response to a STATUS retry we sent.
         String pSeq = packetPart(packet, 3);
         if (pSeq == pendingVerify.command.id) {
-          pFb  = packetPart(packet, 5);
-          pAux = packetPart(packet, 6);
+          pRelay = packetPart(packet, 5);
+          pAux   = packetPart(packet, 6);
+          pFb    = packetPart(packet, 7);
           lastRssi = radio.getRSSI();
           lastSnr  = radio.getSNR();
           relevant = true;
         }
       }
 
-      if (relevant && pFb.length() > 0) {
+      if (relevant && (pFb.length() > 0 || pAux.length() > 0 || pRelay.length() > 0)) {
         pendingVerify.lastFb     = pFb;
         pendingVerify.lastAuxRaw = pAux;
 
-        Serial.printf("[VERIFY] checking desired=%s actual=%s fb=%s\n",
-          pendingVerify.expectedState.c_str(), pAux.c_str(), pFb.c_str());
+        if (pAux.length() == 0) {
+          Serial.printf("[AUX MISSING] command_id=%s packet=%s\n",
+            pendingVerify.command.id.c_str(), packet.c_str());
+        }
 
-        if (isCommandVerified(pendingVerify.expectedState, pFb, pAux)) {
-          Serial.println("[VERIFY] success");
+        const bool verified = isCommandVerified(pendingVerify.expectedState, pAux);
+        const bool auxOpposite = isAuxOppositeExpected(pendingVerify.expectedState, pAux);
+        const char* verifyResult = verified ? "verified" : (auxOpposite ? "opposite_waiting" : "pending");
+        Serial.printf("[AUX VERIFY] desired=%s aux_raw=%s feedback=%s result=%s\n",
+          pendingVerify.expectedState.c_str(), pAux.c_str(), pFb.c_str(), verifyResult);
+
+        if (verified) {
           String confirmedState = (pendingVerify.expectedState == "on") ? "on" : "off";
           String nowTs = timestampNow();
           markCommandLifecycleStatus(pendingVerify.command, "verified", "verified_at");
@@ -1425,27 +1432,7 @@ void checkVerificationWindow() {
           return;
         }
 
-        if (isCommandDefinitelyFailed(pendingVerify.expectedState, pFb)) {
-          Serial.printf("[VERIFY] failed after window (fb=%s)\n", pFb.c_str());
-          String nowTs = timestampNow();
-          markCommandLifecycleStatus(pendingVerify.command, "verification_failed", "failed_at", "aux_feedback_mismatch");
-          updateDeviceContactorFeedback(pendingVerify.command.deviceId, pFb, pAux,
-                                        "", false, "verification_failed", "verification_failed", nowTs);
-          updateDeviceCommandStatus(pendingVerify.command.deviceId, "verification_failed", "verification_failed", "", nowTs);
-          markCommandFailed(pendingVerify.command,
-            "Physical feedback did not match after verification window: " + pFb,
-            "verification_failed",
-            "aux_feedback_mismatch");
-          if (lastVerificationAlertCommandId != pendingVerify.command.id) {
-            lastVerificationAlertCommandId = pendingVerify.command.id;
-            createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
-              "Field Lynk command was sent but physical feedback did not match. Check the fence controller.");
-          }
-          rememberCommandId(pendingVerify.command.id);
-          pendingVerify.active = false;
-          radio.startReceive();
-          return;
-        }
+        // Do not fail early on opposite AUX; continue retries until timeout.
       }
     }
     radio.startReceive();
@@ -1453,24 +1440,44 @@ void checkVerificationWindow() {
 
   // Timeout: window expired without confirmation.
   if (elapsedMs >= CONTACT_VERIFY_TIMEOUT_MS) {
-    Serial.printf("[VERIFY] failed after timeout (elapsed=%lu ms, last_fb=%s)\n",
-      elapsedMs, pendingVerify.lastFb.c_str());
+    Serial.printf("[VERIFY] failed after timeout (elapsed=%lu ms, last_fb=%s, last_aux=%s)\n",
+      elapsedMs, pendingVerify.lastFb.c_str(), pendingVerify.lastAuxRaw.c_str());
+    const bool auxMissing = pendingVerify.lastAuxRaw.length() == 0;
+    const bool auxMismatch = isAuxOppositeExpected(pendingVerify.expectedState, pendingVerify.lastAuxRaw);
+    const String failureReason = auxMissing
+      ? "aux_missing"
+      : (auxMismatch ? "aux_mismatch" : "verification_timeout");
     String nowTs = timestampNow();
-    markCommandLifecycleStatus(pendingVerify.command, "verification_failed", "failed_at", "verification_timeout");
+    markCommandLifecycleStatus(
+      pendingVerify.command,
+      "verification_failed",
+      "failed_at",
+      failureReason
+    );
     updateDeviceContactorFeedback(pendingVerify.command.deviceId,
                                   pendingVerify.lastFb, pendingVerify.lastAuxRaw,
                                   "", false, "verification_failed", "verification_failed", nowTs);
     updateDeviceCommandStatus(pendingVerify.command.deviceId, "verification_failed", "verification_failed", "", nowTs);
     markCommandFailed(pendingVerify.command,
-      "Verification timeout — no physical confirmation received",
+      auxMissing
+        ? "Verification timeout — aux contact feedback missing"
+        : (auxMismatch
+            ? "Verification timeout — aux contact remained opposite of requested state"
+            : "Verification timeout — no physical confirmation received"),
       "verification_failed",
-      "verification_timeout");
+      failureReason);
     bool nodeLooksOffline = (lastHbReceivedAt == 0) || ((millis() - lastHbReceivedAt) > HB_OFFLINE_TIMEOUT_MS);
     if (lastVerificationAlertCommandId != pendingVerify.command.id) {
       lastVerificationAlertCommandId = pendingVerify.command.id;
       if (nodeLooksOffline) {
         createAndSendAlert("critical", "Field Lynk Connection Issue",
           "Field Lynk command could not be verified because the node appears offline or stale.");
+      } else if (auxMissing) {
+        createAndSendAlert("critical", "Field Lynk Aux Feedback Missing",
+          "Field Lynk command was sent, but aux contact feedback was not received before timeout.");
+      } else if (auxMismatch) {
+        createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
+          "Field Lynk command was sent, but aux contact remained opposite of the requested state.");
       } else {
         createAndSendAlert("critical", "Field Lynk Command Not Confirmed",
           "Field Lynk command was sent but physical feedback did not match. Check the fence controller.");
@@ -1539,21 +1546,35 @@ void processHeartbeatIfReady() {
 
   String hbKey   = packetPart(packet, 1);
   String hbNode  = packetPart(packet, 2);
-  String hbState = packetPart(packet, 3);
-  String hbFb    = packetPart(packet, 4);
-  String hbAux   = packetPart(packet, 5);
+  // New HB layout:
+  // HB|key|node|HB|cmd_state|relay_state|aux_raw|contactor_feedback|confirmed_state|uptime|firmware|wifi
+  String hbMarker = packetPart(packet, 3);
+  String hbState = packetPart(packet, 4);
+  String hbRelay = packetPart(packet, 5);
+  String hbAux   = packetPart(packet, 6);
+  String hbFb    = packetPart(packet, 7);
+  String hbConfirmedState = packetPart(packet, 8);
+
+  // Backward-compatible fallback for older heartbeat layout.
+  if (hbMarker != "HB") {
+    hbState = packetPart(packet, 3);
+    hbRelay = hbState;
+    hbFb    = packetPart(packet, 4);
+    hbAux   = packetPart(packet, 5);
+    hbConfirmedState = (hbAux == "AUX_HIGH") ? "on" : (hbAux == "AUX_LOW" ? "off" : "");
+  }
 
   if (hbKey != NETWORK_KEY || hbNode != NODE_ID) {
     radio.startReceive();
     return;
   }
 
-  Serial.printf("HB received: state=%s fb=%s aux=%s\n",
-    hbState.c_str(), hbFb.c_str(), hbAux.c_str());
+  Serial.printf("[HB PACKET] state=%s relay=%s aux=%s fb=%s confirmed=%s\n",
+    hbState.c_str(), hbRelay.c_str(), hbAux.c_str(), hbFb.c_str(), hbConfirmedState.c_str());
 
   // Optional fields added in firmware 1.1.0+ — gracefully absent on older nodes.
-  String hbFirmwareVersion  = packetPart(packet, 7);  // e.g. "1.1.0"; empty on old firmware
-  bool   hbWifiConnected    = (packetPart(packet, 8) == "1");
+  String hbFirmwareVersion  = packetPart(packet, hbMarker == "HB" ? 10 : 7);  // e.g. "1.1.0"; empty on old firmware
+  bool   hbWifiConnected    = (packetPart(packet, hbMarker == "HB" ? 11 : 8) == "1");
 
   if (hbFirmwareVersion.length() > 0) {
     Serial.printf("HB firmware: version=%s wifi=%s\n",

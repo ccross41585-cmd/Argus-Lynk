@@ -32,7 +32,7 @@ const String NETWORK_KEY = "farm123";
 const String NODE_ID = "fence1";
 
 // ── Firmware identity ────────────────────────────────────────────────────────────────────
-const char* DEVICE_FIRMWARE_VERSION = "1.1.0";
+const char* DEVICE_FIRMWARE_VERSION = "1.1.1";
 const char* DEVICE_BUILD_DATE       = "2026-06-13";
 const char* DEVICE_ROLE             = "field_node";
 #if FIELD_NODE_OTA_AVAILABLE
@@ -346,6 +346,8 @@ void setupRelay() {
 void sendHeartbeat() {
   String fb  = contactorFeedback();
   String raw = auxRawLabel();
+  String relayState = readRelayOutputState() ? "ON" : "OFF";
+  String physState = readAuxDebounced() ? "on" : "off";
 
   // Optional firmware fields (parts 7 and 8).
   // The gateway silently ignores these on older builds; newer builds parse them.
@@ -356,12 +358,18 @@ void sendHeartbeat() {
   String wifiStr = "0";
 #endif
 
-  String packet = "HB|" + NETWORK_KEY + "|" + NODE_ID + "|"
-                  + (commandedOn ? "ON" : "OFF") + "|" + fb + "|" + raw + "|"
-                  + String(millis())
+  // Layout:
+  // HB|<key>|<node>|HB|<cmd_state>|<relay_state>|<aux_raw>|<contactor_feedback>|<confirmed_state>|<uptime_ms>|<firmware_version>|<wifi_connected>
+  String packet = "HB|" + NETWORK_KEY + "|" + NODE_ID + "|HB"
+                  + "|" + (commandedOn ? "ON" : "OFF")
+                  + "|" + relayState
+                  + "|" + raw
+                  + "|" + fb
+                  + "|" + physState
+                  + "|" + String(millis())
                   + "|" + String(DEVICE_FIRMWARE_VERSION)
                   + "|" + wifiStr;
-  Serial.print("Sending HB: ");
+  Serial.print("[HB PACKET] ");
   Serial.println(packet);
   int state = radio.transmit(packet);
   if (state != RADIOLIB_ERR_NONE) {
@@ -387,17 +395,24 @@ void sendAck(const String& sequence) {
   // Physical confirmed_state: "on" if aux contact is closed (AUX_HIGH), "off" otherwise.
   // Independent of commanded state — this is what the gateway uses to verify the command.
   String physState = readAuxDebounced() ? "on" : "off";
-  // Format: ACK|<key>|<node>|<seq>|<cmd_state>|<relay_state>|<aux_raw>|<contactor_feedback>|<confirmed_state>
+  // Layout:
+  // ACK|<key>|<node>|<seq>|<cmd_state>|<relay_state>|<aux_raw>|<contactor_feedback>|<confirmed_state>|<firmware_version>|<wifi_connected>
   String packet = "ACK|" + NETWORK_KEY + "|" + NODE_ID + "|" + sequence
                   + "|" + (commandedOn ? "ON" : "OFF")
                   + "|" + relayState
                   + "|" + raw
                   + "|" + fb
-                  + "|" + physState;
+                  + "|" + physState
+                  + "|" + String(DEVICE_FIRMWARE_VERSION)
+#if FIELD_NODE_OTA_AVAILABLE
+                  + "|" + String(wifiConnected ? "1" : "0");
+#else
+                  + "|0";
+#endif
   lastAckText = commandedOn ? "ON" : "OFF";
   drawScreen();
 
-  Serial.print("Sending ACK: ");
+  Serial.print("[ACK PACKET] ");
   Serial.println(packet);
   Serial.print("AUX_RAW=");
   Serial.println(raw);
