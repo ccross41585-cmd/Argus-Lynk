@@ -20,8 +20,8 @@ const char* GATEWAY_ID = "home-base-001";
 //   devices.target_firmware_version column in Supabase to drive staged rollout,
 //   update-available notifications, and rollback tracking.  The gateway OTA
 //   hostname is argus-gateway-<GATEWAY_ID> (e.g. argus-gateway-home-base-001).
-const char* DEVICE_FIRMWARE_VERSION = "1.1.3";
-const char* DEVICE_BUILD_DATE       = "2026-06-13";
+const char* DEVICE_FIRMWARE_VERSION = "1.1.4";
+const char* DEVICE_BUILD_DATE       = "2026-06-18";
 const char* DEVICE_ROLE             = "gateway";
 const bool  OTA_SUPPORTED           = true;
 
@@ -104,6 +104,8 @@ String lastCommandText = "NONE";
 String lastAckText = "NONE";
 String lastTxText = "NONE";
 String lastErrorText = "";
+String lastHttpResponseBody = "";
+int lastHttpStatusCode = 0;
 int lastPollCount = 0;
 float lastRssi = NAN;
 float lastSnr = NAN;
@@ -470,6 +472,7 @@ bool sendJsonPatch(const String& url, const String& payload, const String& conte
   logVerbose("sendJsonPatch headers ready");
 
   int statusCode = http.PATCH(payload);
+  lastHttpStatusCode = statusCode;
   if (DEBUG_VERBOSE) {
     Serial.print("sendJsonPatch PATCH returned: ");
     Serial.println(statusCode);
@@ -480,6 +483,7 @@ bool sendJsonPatch(const String& url, const String& payload, const String& conte
     logVerbose("sendJsonPatch reading error response body");
     response = http.getString();
   }
+  lastHttpResponseBody = response;
 
   logVerbose("sendJsonPatch calling http.end()");
   http.end();
@@ -493,6 +497,12 @@ bool sendJsonPatch(const String& url, const String& payload, const String& conte
   supabaseOk = true;
   logVerbose("sendJsonPatch success");
   return true;
+}
+
+bool isMissingFailureReasonColumnError() {
+  return lastHttpStatusCode == 400
+    && lastHttpResponseBody.indexOf("PGRST204") >= 0
+    && lastHttpResponseBody.indexOf("failure_reason") >= 0;
 }
 
 bool updateDeviceCommandStatus(const String& deviceId,
@@ -846,7 +856,24 @@ bool markCommandFailed(const PendingCommand& command,
   lastErrorText = errorMessage;
   supabaseOk = false;
   drawScreen();
-  return sendJsonPatch(url, payload, "PATCH device_commands failed");
+  if (sendJsonPatch(url, payload, "PATCH device_commands failed")) {
+    return true;
+  }
+
+  if (failureReason.length() == 0 || !isMissingFailureReasonColumnError()) {
+    return false;
+  }
+
+  Serial.println("[SCHEMA COMPAT] device_commands.failure_reason missing. Retrying without failure_reason field.");
+  DynamicJsonDocument fallbackBody(256);
+  fallbackBody["status"] = status;
+  fallbackBody["error_message"] = errorMessage;
+  if (status == "verification_failed" && nowTs.length() > 0) {
+    fallbackBody["failed_at"] = nowTs;
+  }
+  String fallbackPayload;
+  serializeJson(fallbackBody, fallbackPayload);
+  return sendJsonPatch(url, fallbackPayload, "PATCH device_commands failed (schema fallback)");
 }
 
 bool markCommandLifecycleStatus(const PendingCommand& command,
@@ -868,7 +895,23 @@ bool markCommandLifecycleStatus(const PendingCommand& command,
   String url = buildApiUrl("device_commands?id=eq." + command.id);
   String payload;
   serializeJson(body, payload);
-  return sendJsonPatch(url, payload, "PATCH device_commands lifecycle status");
+  if (sendJsonPatch(url, payload, "PATCH device_commands lifecycle status")) {
+    return true;
+  }
+
+  if (failureReason.length() == 0 || !isMissingFailureReasonColumnError()) {
+    return false;
+  }
+
+  Serial.println("[SCHEMA COMPAT] device_commands.failure_reason missing. Retrying lifecycle patch without failure_reason.");
+  DynamicJsonDocument fallbackBody(512);
+  fallbackBody["status"] = status;
+  if (timestampField.length() > 0 && nowTs.length() > 0) {
+    fallbackBody[timestampField] = nowTs;
+  }
+  String fallbackPayload;
+  serializeJson(fallbackBody, fallbackPayload);
+  return sendJsonPatch(url, fallbackPayload, "PATCH device_commands lifecycle status (schema fallback)");
 }
 
 bool fetchPendingCommands(PendingCommand* commands, size_t maxCommands, size_t& commandCount) {
@@ -876,7 +919,7 @@ bool fetchPendingCommands(PendingCommand* commands, size_t maxCommands, size_t& 
 
   String url = buildApiUrl(
     "device_commands?or=(status.eq.pending,status.eq.gateway_received,status.eq.sent_to_node,status.eq.node_acknowledged,status.eq.verifying)"
-    "&order=created_at.asc"
+    "&order=created_at.desc"
     "&select=id,device_id,gateway_id,command,status,created_at"
   );
 
@@ -1517,9 +1560,9 @@ void checkVerificationWindow() {
 }
 
 void pollSupabase() {
-  PendingCommand commands[8];
+  PendingCommand commands[16];
   size_t commandCount = 0;
-  if (!fetchPendingCommands(commands, 8, commandCount)) {
+  if (!fetchPendingCommands(commands, 16, commandCount)) {
     return;
   }
 
