@@ -1004,8 +1004,14 @@ export function DeviceDetailPage() {
             )}
 
             {!waitingForConfirmation && latestCommand?.status === 'acknowledged' && (
-              <div className="alert alert--success">
+              <div className="alert alert--warning">
                 Latest command acknowledged at {formatTimestamp(latestCommand.acknowledged_at)}.
+              </div>
+            )}
+
+            {latestCommand?.status === 'verified' && (
+              <div className="alert alert--success">
+                Latest command physically verified at {formatTimestamp(latestCommand.acknowledged_at ?? latestCommand.sent_at ?? latestCommand.created_at)}.
               </div>
             )}
 
@@ -1024,7 +1030,7 @@ export function DeviceDetailPage() {
               <div>
                 <p className="eyebrow">Fence Controls</p>
                 <p className="section-copy">
-                  Commands are inserted into device_commands. The UI does not assume success until the command is acknowledged.
+                  Commands are inserted into device_commands. The UI does not assume physical success until the command is verified.
                 </p>
               </div>
               <div className="button-row">

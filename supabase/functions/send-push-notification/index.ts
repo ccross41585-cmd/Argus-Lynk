@@ -359,22 +359,28 @@ serve(async (req: Request) => {
 
   console.log(`[HANDLER] alertId=${body.alertId}`)
 
-  // 1. Load alert
-  const { data: alert, error: alertErr } = await supabase
+  // 1. Atomic dedup claim — set push_dispatched_at only when it is NULL.
+  // This prevents duplicate pushes when the trigger + a direct caller both
+  // invoke this function for the same alert (e.g. gateway inserts alert AND
+  // the pg_net trigger fires within milliseconds of each other).
+  // The UPDATE only matches if push_dispatched_at IS NULL; the first writer wins.
+  const { data: claimed } = await supabase
     .from('alerts')
-    .select('id, title, message, severity, device_id, tenant_id')
+    .update({ push_dispatched_at: new Date().toISOString() })
     .eq('id', body.alertId)
-    .single()
+    .is('push_dispatched_at', null)
+    .select('id, title, message, severity, device_id, tenant_id')
+    .maybeSingle()
 
-  if (alertErr || !alert) {
-    console.error('[HANDLER] Alert not found:', alertErr?.message)
-    return new Response(JSON.stringify({ error: alertErr?.message ?? 'Alert not found' }), {
-      status: 404,
+  if (!claimed) {
+    // push_dispatched_at was already set — another invocation beat us, skip.
+    console.log(`[HANDLER] Push already dispatched for alert ${body.alertId}, skipping duplicate`)
+    return new Response(JSON.stringify({ sent: 0, message: 'Already dispatched' }), {
       headers: { 'Content-Type': 'application/json' },
     })
   }
 
-  const alertRow = alert as AlertRow
+  const alertRow = claimed as AlertRow
   console.log(`[HANDLER] Alert loaded: "${alertRow.title}" severity=${alertRow.severity} tenant=${alertRow.tenant_id ?? 'null'}`)
 
   let resolvedDeviceType = body.deviceType ?? null

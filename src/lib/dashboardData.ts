@@ -729,6 +729,15 @@ export async function silenceLiveAlert(alertId: string): Promise<void> {
     .eq('id', alertId)
 }
 
+export async function clearAllLiveAlerts(alertIds: string[]): Promise<void> {
+  if (!supabase || alertIds.length === 0) return
+  const now = new Date().toISOString()
+  await supabase
+    .from('alerts')
+    .update({ status: 'acknowledged', acknowledged_at: now, resolved_at: now })
+    .in('id', alertIds)
+}
+
 // ── Realtime ──────────────────────────────────────────────────────────────────
 
 /**

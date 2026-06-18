@@ -61,6 +61,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
 // Polling and ACK timing.
 const unsigned long POLL_INTERVAL_MS = 2000;
 const unsigned long ACK_TIMEOUT_MS = 3000;
+const unsigned long COMMAND_RECOVERY_TIMEOUT_MS = 10UL * 60UL * 1000UL;  // 10 min
 const size_t RECENT_COMMAND_CACHE_SIZE = 12;
 
 // Simple NTP setup so the gateway can send ISO timestamps to Supabase.
@@ -73,6 +74,8 @@ struct PendingCommand {
   String deviceId;
   String gatewayId;
   String command;
+  String status;
+  String createdAt;
 };
 
 // Post-command verification state machine.
@@ -85,7 +88,7 @@ struct PendingVerify {
   unsigned long startedAt; // millis() when window opened
   int retries;             // number of STATUS retries sent so far
 };
-PendingVerify pendingVerify = {false, {"", "", "", ""}, "", "", "", 0, 0};
+PendingVerify pendingVerify = {false, {"", "", "", "", "", ""}, "", "", "", 0, 0};
 
 String recentCommandIds[RECENT_COMMAND_CACHE_SIZE];
 size_t recentCommandWriteIndex = 0;
@@ -366,6 +369,76 @@ String timestampNow() {
   return String(buffer);
 }
 
+bool parseIsoTimestampUtc(const String& isoTs, time_t& outEpoch) {
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+
+  // Accept either Zulu or offset-less UTC format.
+  int matched = sscanf(
+    isoTs.c_str(),
+    "%d-%d-%dT%d:%d:%dZ",
+    &year,
+    &month,
+    &day,
+    &hour,
+    &minute,
+    &second
+  );
+  if (matched != 6) {
+    matched = sscanf(
+      isoTs.c_str(),
+      "%d-%d-%dT%d:%d:%d",
+      &year,
+      &month,
+      &day,
+      &hour,
+      &minute,
+      &second
+    );
+  }
+  if (matched != 6) {
+    return false;
+  }
+
+  struct tm tmValue = {};
+  tmValue.tm_year = year - 1900;
+  tmValue.tm_mon = month - 1;
+  tmValue.tm_mday = day;
+  tmValue.tm_hour = hour;
+  tmValue.tm_min = minute;
+  tmValue.tm_sec = second;
+  tmValue.tm_isdst = 0;
+
+  time_t epoch = mktime(&tmValue);
+  if (epoch <= 0) {
+    return false;
+  }
+
+  outEpoch = epoch;
+  return true;
+}
+
+bool isCommandExpiredByAge(const PendingCommand& command) {
+  if (command.createdAt.length() == 0) return false;
+
+  time_t createdEpoch = 0;
+  if (!parseIsoTimestampUtc(command.createdAt, createdEpoch)) {
+    return false;
+  }
+
+  time_t nowEpoch = time(nullptr);
+  if (nowEpoch <= 0) return false;
+
+  long ageSeconds = (long)difftime(nowEpoch, createdEpoch);
+  if (ageSeconds < 0) return false;
+
+  return (unsigned long)ageSeconds * 1000UL >= COMMAND_RECOVERY_TIMEOUT_MS;
+}
+
 void printHttpError(const String& context, int statusCode, const String& body) {
   supabaseOk = false;
   lastErrorText = context + " HTTP " + String(statusCode);
@@ -496,11 +569,24 @@ bool markCommandSent(const PendingCommand& command) {
     }
   }
 
+  String desiredState = commandToConfirmedState(command.command);
+  if (desiredState == "on" || desiredState == "off") {
+    DynamicJsonDocument desiredBody(256);
+    desiredBody["desired_state"] = desiredState;
+    String desiredPayload;
+    serializeJson(desiredBody, desiredPayload);
+    sendJsonPatch(buildApiUrl("devices?id=eq." + command.deviceId), desiredPayload, "PATCH devices desired_state at command pickup");
+    Serial.printf("[STATE SEPARATION] desired=%s confirmed=(unchanged) device=%s\n",
+      desiredState.c_str(), command.deviceId.c_str());
+  }
+
   updateDeviceCommandStatus(command.deviceId, "sent", "pending");
+  Serial.printf("[COMMAND PROGRESS] gateway_received id=%s device=%s\n",
+    command.id.c_str(), command.deviceId.c_str());
   return true;
 }
 
-bool markCommandAcknowledged(const PendingCommand& command, const String& confirmedState) {
+bool markCommandAcknowledged(const PendingCommand& command) {
   DynamicJsonDocument body(256);
   body["status"] = "node_acknowledged";
   body["error_message"] = nullptr;
@@ -529,34 +615,38 @@ bool markCommandAcknowledged(const PendingCommand& command, const String& confir
     }
   }
 
-  DynamicJsonDocument deviceBody(512);
-  deviceBody["confirmed_state"] = confirmedState;
-  deviceBody["desired_state"] = confirmedState;
-  deviceBody["online"] = true;
-  deviceBody["status"] = "online";
+  updateDeviceCommandStatus(command.deviceId, "node_acknowledged", "pending");
 
-  String lastSeen = timestampNow();
-  if (lastSeen.length() > 0) {
-    deviceBody["last_seen"]    = lastSeen;
-    deviceBody["last_seen_at"] = lastSeen;
-  }
+  Serial.printf("[COMMAND PROGRESS] node_acknowledged id=%s device=%s\n",
+    command.id.c_str(), command.deviceId.c_str());
+  drawScreen();
+  return true;
+}
 
-  Serial.printf("[ACK] Updating device %s: online=true status=online last_seen=%s\n",
-    command.deviceId.c_str(), lastSeen.c_str());
-
-  String deviceUrl = buildApiUrl("devices?id=eq." + command.deviceId);
-  String devicePayload;
-  serializeJson(deviceBody, devicePayload);
-  if (!sendJsonPatch(deviceUrl, devicePayload, "PATCH devices after ACK")) {
+bool updateDeviceConfirmedState(const String& deviceId, const String& confirmedState, const String& desiredState) {
+  if (deviceId.length() == 0 || confirmedState.length() == 0) {
     return false;
   }
 
-  updateDeviceCommandStatus(command.deviceId, "acknowledged", "pending");
+  DynamicJsonDocument deviceBody(512);
+  deviceBody["confirmed_state"] = confirmedState;
+  deviceBody["desired_state"] = desiredState;
+  deviceBody["online"] = true;
+  deviceBody["status"] = "online";
 
-  Serial.print("Device state updated: ");
-  Serial.println(confirmedState);
-  drawScreen();
-  return true;
+  String nowTs = timestampNow();
+  if (nowTs.length() > 0) {
+    deviceBody["last_seen"]    = nowTs;
+    deviceBody["last_seen_at"] = nowTs;
+  }
+
+  Serial.printf("[STATE SEPARATION] desired=%s confirmed=%s device=%s\n",
+    desiredState.c_str(), confirmedState.c_str(), deviceId.c_str());
+
+  String deviceUrl = buildApiUrl("devices?id=eq." + deviceId);
+  String devicePayload;
+  serializeJson(deviceBody, devicePayload);
+  return sendJsonPatch(deviceUrl, devicePayload, "PATCH devices confirmed state after verification");
 }
 
 bool updateDeviceContactorFeedback(const String& deviceId,
@@ -749,6 +839,8 @@ bool markCommandFailed(const PendingCommand& command,
   String url = buildApiUrl("device_commands?id=eq." + command.id);
   String payload;
   serializeJson(body, payload);
+  Serial.printf("[COMMAND FAILED] id=%s status=%s reason=%s error=%s\n",
+    command.id.c_str(), status.c_str(), failureReason.c_str(), errorMessage.c_str());
   Serial.print("Command failed: ");
   Serial.println(errorMessage);
   lastErrorText = errorMessage;
@@ -782,7 +874,11 @@ bool markCommandLifecycleStatus(const PendingCommand& command,
 bool fetchPendingCommands(PendingCommand* commands, size_t maxCommands, size_t& commandCount) {
   commandCount = 0;
 
-  String url = buildApiUrl("device_commands?status=eq.pending&order=created_at.asc&select=id,device_id,gateway_id,command");
+  String url = buildApiUrl(
+    "device_commands?or=(status.eq.pending,status.eq.gateway_received,status.eq.sent_to_node,status.eq.node_acknowledged,status.eq.verifying)"
+    "&order=created_at.asc"
+    "&select=id,device_id,gateway_id,command,status,created_at"
+  );
 
   HTTPClient http;
   http.begin(url);
@@ -827,6 +923,11 @@ bool fetchPendingCommands(PendingCommand* commands, size_t maxCommands, size_t& 
     nextCommand.deviceId = row["device_id"].as<const char*>();
     nextCommand.gatewayId = row["gateway_id"].isNull() ? "" : String(row["gateway_id"].as<const char*>());
     nextCommand.command = row["command"].as<const char*>();
+    nextCommand.status = row["status"].isNull() ? "pending" : String(row["status"].as<const char*>());
+    nextCommand.createdAt = row["created_at"].isNull() ? "" : String(row["created_at"].as<const char*>());
+
+    Serial.printf("[COMMAND RECOVERY] status=%s id=%s created_at=%s\n",
+      nextCommand.status.c_str(), nextCommand.id.c_str(), nextCommand.createdAt.c_str());
   }
 
   lastPollCount = static_cast<int>(commandCount);
@@ -1067,6 +1168,20 @@ void processPendingCommand(const PendingCommand& command) {
     return;
   }
 
+  const String recoveredStatus = command.status.length() > 0 ? command.status : "pending";
+  Serial.printf("[COMMAND RECOVERY] status=%s id=%s\n", recoveredStatus.c_str(), command.id.c_str());
+
+  if (isCommandExpiredByAge(command)) {
+    markCommandFailed(
+      command,
+      "Command expired before completion",
+      "expired",
+      "command_expired"
+    );
+    rememberCommandId(command.id);
+    return;
+  }
+
   String expectedState = commandToConfirmedState(command.command);
   String legacyAction = commandToLegacyAction(command.command);
   if (expectedState == "unknown" || legacyAction.length() == 0) {
@@ -1074,6 +1189,22 @@ void processPendingCommand(const PendingCommand& command) {
     if (markCommandFailed(command, "Unsupported command for gateway MVP")) {
       rememberCommandId(command.id);
     }
+    return;
+  }
+
+  if (recoveredStatus == "verifying" || recoveredStatus == "node_acknowledged" || recoveredStatus == "acknowledged") {
+    markCommandLifecycleStatus(command, "verifying");
+    updateDeviceCommandStatus(command.deviceId, "verifying", "pending");
+    Serial.printf("[COMMAND PROGRESS] verifying id=%s (recovered from %s)\n",
+      command.id.c_str(), recoveredStatus.c_str());
+    pendingVerify.active        = true;
+    pendingVerify.command       = command;
+    pendingVerify.expectedState = expectedState;
+    pendingVerify.lastAuxRaw    = "";
+    pendingVerify.lastFb        = "";
+    pendingVerify.startedAt     = millis();
+    pendingVerify.retries       = 0;
+    radio.startReceive();
     return;
   }
 
@@ -1114,6 +1245,7 @@ void processPendingCommand(const PendingCommand& command) {
     Serial.print(" id=");
     Serial.println(shortCommandId(command.id));
     markCommandLifecycleStatus(command, "sent_to_node", "sent_to_node_at");
+    Serial.printf("[COMMAND PROGRESS] sent_to_node id=%s\n", command.id.c_str());
 
     logVerbose("Starting ACK wait...");
     ack = waitForAck(command);
@@ -1142,6 +1274,10 @@ void processPendingCommand(const PendingCommand& command) {
 
   if (ack.isValid) {
     markCommandLifecycleStatus(command, "node_acknowledged", "node_acknowledged_at");
+    Serial.printf("[COMMAND PROGRESS] node_acknowledged id=%s\n", command.id.c_str());
+    markCommandLifecycleStatus(command, "verifying");
+    updateDeviceCommandStatus(command.deviceId, "verifying", "pending");
+    Serial.printf("[COMMAND PROGRESS] verifying id=%s\n", command.id.c_str());
     Serial.printf("[ACK] node=%s state=%s aux=%s fb=%s\n",
       NODE_ID.c_str(), ack.confirmedState.c_str(), ack.auxRaw.c_str(), ack.contactorFeedback.c_str());
     Serial.printf("[VERIFY] checking desired=%s actual=%s fb=%s\n",
@@ -1150,13 +1286,14 @@ void processPendingCommand(const PendingCommand& command) {
     if (isCommandVerified(expectedState, ack.contactorFeedback, ack.auxRaw)) {
       Serial.println("[VERIFY] success");
       String nowTs = timestampNow();
-      if (markCommandAcknowledged(command, ack.confirmedState)) {
-        markCommandLifecycleStatus(command, "verified", "verified_at");
-        updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
-                                      "", false, "verified", "verified", nowTs);
-        updateDeviceCommandStatus(command.deviceId, "verified", "verified", nowTs);
-        rememberCommandId(command.id);
-      }
+      markCommandLifecycleStatus(command, "verified", "verified_at");
+      updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
+                                    "", false, "verified", "verified", nowTs);
+      updateDeviceCommandStatus(command.deviceId, "verified", "verified", nowTs);
+      updateDeviceConfirmedState(command.deviceId, ack.confirmedState, expectedState);
+      Serial.printf("[COMMAND VERIFIED] id=%s desired=%s confirmed=%s\n",
+        command.id.c_str(), expectedState.c_str(), ack.confirmedState.c_str());
+      rememberCommandId(command.id);
       Serial.println("Finished command processing, returning to polling");
       return;
     }
@@ -1185,6 +1322,7 @@ void processPendingCommand(const PendingCommand& command) {
 
     // Contactor feedback uncertain — start post-command verification window.
     Serial.printf("[VERIFY] retry 1 — entering verification window (fb=%s)\n", ack.contactorFeedback.c_str());
+    markCommandAcknowledged(command);
     updateDeviceContactorFeedback(command.deviceId, ack.contactorFeedback, ack.auxRaw,
                                   "", false, "verifying", "pending", "");
     updateDeviceCommandStatus(command.deviceId, "verifying", "pending");
@@ -1204,6 +1342,8 @@ void processPendingCommand(const PendingCommand& command) {
   // ACK may be lost even when the node acted on the command. Do one explicit
   // verification window with STATUS retries before declaring failure.
   Serial.println("[VERIFY] No ACK yet — entering verification window for extra checks.");
+  markCommandLifecycleStatus(command, "verifying");
+  Serial.printf("[COMMAND PROGRESS] verifying id=%s\n", command.id.c_str());
   updateDeviceCommandStatus(command.deviceId, "verifying", "pending");
   pendingVerify.active        = true;
   pendingVerify.command       = command;
@@ -1270,11 +1410,13 @@ void checkVerificationWindow() {
           Serial.println("[VERIFY] success");
           String confirmedState = (pendingVerify.expectedState == "on") ? "on" : "off";
           String nowTs = timestampNow();
-          markCommandAcknowledged(pendingVerify.command, confirmedState);
           markCommandLifecycleStatus(pendingVerify.command, "verified", "verified_at");
           updateDeviceContactorFeedback(pendingVerify.command.deviceId, pFb, pAux,
                                         "", false, "verified", "verified", nowTs);
           updateDeviceCommandStatus(pendingVerify.command.deviceId, "verified", "verified", nowTs);
+          updateDeviceConfirmedState(pendingVerify.command.deviceId, confirmedState, pendingVerify.expectedState);
+          Serial.printf("[COMMAND VERIFIED] id=%s desired=%s confirmed=%s\n",
+            pendingVerify.command.id.c_str(), pendingVerify.expectedState.c_str(), confirmedState.c_str());
           rememberCommandId(pendingVerify.command.id);
           lastFenceState = normalizedFenceState(confirmedState);
           pendingVerify.active = false;
@@ -1314,7 +1456,7 @@ void checkVerificationWindow() {
     Serial.printf("[VERIFY] failed after timeout (elapsed=%lu ms, last_fb=%s)\n",
       elapsedMs, pendingVerify.lastFb.c_str());
     String nowTs = timestampNow();
-    markCommandLifecycleStatus(pendingVerify.command, "verification_failed", "failed_at", "gateway_timeout");
+    markCommandLifecycleStatus(pendingVerify.command, "verification_failed", "failed_at", "verification_timeout");
     updateDeviceContactorFeedback(pendingVerify.command.deviceId,
                                   pendingVerify.lastFb, pendingVerify.lastAuxRaw,
                                   "", false, "verification_failed", "verification_failed", nowTs);
@@ -1322,7 +1464,7 @@ void checkVerificationWindow() {
     markCommandFailed(pendingVerify.command,
       "Verification timeout — no physical confirmation received",
       "verification_failed",
-      "gateway_timeout");
+      "verification_timeout");
     bool nodeLooksOffline = (lastHbReceivedAt == 0) || ((millis() - lastHbReceivedAt) > HB_OFFLINE_TIMEOUT_MS);
     if (lastVerificationAlertCommandId != pendingVerify.command.id) {
       lastVerificationAlertCommandId = pendingVerify.command.id;

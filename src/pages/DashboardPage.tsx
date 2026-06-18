@@ -21,6 +21,7 @@ import {
 import {
   acknowledgeLiveAlert,
   buildOverview,
+  clearAllLiveAlerts,
   createLiveCommand,
   generateContactorAlerts,
   getLiveDashboard,
@@ -268,7 +269,6 @@ export function DashboardPage() {
   const activeFenceDeviceIdRef = useRef<string | null>(null)
   const activeFenceDesiredStateRef = useRef<'ON' | 'OFF' | null>(null)
   const fencePendingStateRef = useRef(false)
-  const fenceReminderLogRef = useRef<string | null>(null)
 
   useEffect(() => {
     let isActive = true
@@ -415,37 +415,15 @@ export function DashboardPage() {
 
     // Realtime alert subscription: adds new DB alerts and fires a local
 
+    // Realtime subscription: update in-app alert list when new alerts arrive.
+    // Notifications are delivered via true Web Push (send-push-notification edge
+    // function + service worker push event), NOT from foreground app code.
     const unsubscribeAlerts = isSupabaseConfigured
-      ? subscribeToAlerts(async (newAlert) => {
+      ? subscribeToAlerts((newAlert) => {
           setAlerts((prev) => {
             if (prev.some((a) => a.id === newAlert.id)) return prev
             return [newAlert, ...prev]
           })
-          if (
-            (newAlert.severity === 'critical' || newAlert.severity === 'warning') &&
-            'serviceWorker' in navigator &&
-            Notification.permission === 'granted'
-          ) {
-            const reg = await navigator.serviceWorker.getRegistration('/')
-            if (reg) {
-              await reg.showNotification(
-                newAlert.severity === 'critical' ? '🚨 Argus Critical Alert' : '⚠️ Argus Alert',
-                {
-                  body: newAlert.message,
-                  icon: '/app-icon2.png',
-                  badge: '/app-icon2.png',
-                  tag: `alert-${newAlert.id}`,
-                  requireInteraction: true,
-                  data: { url: `/alerts/${newAlert.id}`, alertId: newAlert.id },
-                  actions: [
-                    { action: 'open', title: 'View' },
-                    { action: 'silence', title: 'Silence' },
-                  ],
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                } as any,
-              )
-            }
-          }
         })
       : () => {}
 
@@ -494,20 +472,6 @@ export function DashboardPage() {
     const storedSince = fenceDevice.metadata.fence_off_since ?? cached?.fence_off_since ?? null
     const reminderSent = Boolean(fenceDevice.metadata.fence_off_reminder_sent ?? cached?.fence_off_reminder_sent ?? false)
     const reminderSentAt = fenceDevice.metadata.fence_off_reminder_sent_at ?? cached?.fence_off_reminder_sent_at ?? null
-
-    const stateSnapshot = JSON.stringify({
-      deviceId,
-      confirmedState: physical.confirmedState,
-      auxRaw: physical.auxRaw,
-      contactorFeedback: physical.contactorFeedback,
-      commandStatus: physical.commandStatus,
-      isFresh: physical.isFresh,
-      storedSince,
-      reminderSent,
-      reminderSentAt,
-    })
-    if (stateSnapshot === fenceReminderLogRef.current) return
-    fenceReminderLogRef.current = stateSnapshot
 
     let fenceOffSince = typeof storedSince === 'string' && storedSince.trim().length > 0 ? storedSince : null
     let fenceOffReminderSent = reminderSent
@@ -827,10 +791,10 @@ export function DashboardPage() {
     ).toUpperCase()
 
     const confirmedState = confirmedRaw.includes('ON') ? 'ON' : confirmedRaw.includes('OFF') ? 'OFF' : null
-    if (confirmedState === target) {
+    if (latestCommand?.status === 'verified' && confirmedState === target) {
       finalizeFenceCommand('success', target, `Confirmed ${target}`)
     }
-  }, [devices])
+  }, [devices, latestCommand?.status])
 
   useEffect(() => {
     const trackedDeviceId = activeFenceDeviceIdRef.current
@@ -937,10 +901,11 @@ export function DashboardPage() {
     if (status === 'sent_to_node') return { tone: 'info', message: 'Sent to Field Lynk...' }
     if (status === 'node_acknowledged' || status === 'acknowledged') return { tone: 'info', message: 'Field Lynk acknowledged...' }
     if (status === 'verified') return { tone: 'success', message: `${target} confirmed.` }
-    if (status === 'completed') return { tone: 'success', message: `${target} confirmed.` }
+    if (status === 'completed') return { tone: 'info', message: 'Command completed. Waiting for physical verification...' }
     if (status === 'gateway_timeout') return { tone: 'danger', message: 'Gateway timed out while sending command.' }
     if (status === 'node_no_ack') return { tone: 'danger', message: 'Field Lynk did not acknowledge command.' }
     if (status === 'verification_failed') return { tone: 'danger', message: 'Command not physically verified. Please check device status.' }
+    if (status === 'expired') return { tone: 'danger', message: 'Command expired before verification.' }
     if (status === 'failed') return { tone: 'danger', message: 'Command failed to complete.' }
     return { tone: 'info', message: 'Sending command...' }
   }
@@ -951,9 +916,10 @@ export function DashboardPage() {
     if (status === 'sent_to_node') return 'Waiting for confirmation...'
     if (status === 'node_acknowledged' || status === 'acknowledged') return `Field Lynk acknowledged ${target}`
     if (status === 'verified') return `Aux contact confirmed ${target}`
-    if (status === 'completed') return `Confirmed ${target}`
+    if (status === 'completed') return 'Command completed; waiting for physical verification...'
     if (status === 'gateway_timeout') return 'Gateway timed out.'
     if (status === 'node_no_ack') return 'Field Lynk did not acknowledge command.'
+    if (status === 'expired') return 'Command expired before verification.'
     if (status === 'verification_failed' || status === 'failed') return 'Failed to confirm, please check device status.'
     return 'Waiting for command...'
   }
@@ -1066,8 +1032,8 @@ export function DashboardPage() {
     setIsFenceCommandSending(true)
 
     const statusSeen = new Set<string>([command.status])
-    const successStatuses = new Set(['verified', 'completed', 'acknowledged', 'node_acknowledged'])
-    const failureStatuses = new Set(['verification_failed', 'failed', 'gateway_timeout', 'node_no_ack'])
+    const successStatuses = new Set(['verified'])
+    const failureStatuses = new Set(['verification_failed', 'failed', 'gateway_timeout', 'node_no_ack', 'expired'])
 
     if (fenceCommandHardTimeoutRef.current !== null) {
       window.clearTimeout(fenceCommandHardTimeoutRef.current)
@@ -1339,6 +1305,26 @@ export function DashboardPage() {
     setBanner({ tone: 'info', message: 'Alert acknowledged.' })
   }
 
+  async function handleClearAllAlerts() {
+    const active = activeAlerts.filter((a) => !a.id.startsWith('synth-'))
+    if (active.length === 0) return
+    const ids = active.map((a) => a.id)
+    const now = new Date().toISOString()
+    if (isSupabaseConfigured) {
+      await clearAllLiveAlerts(ids)
+    } else {
+      await Promise.all(ids.map((id) => acknowledgeAlert(id)))
+    }
+    setAlerts((prev) =>
+      prev.map((a) =>
+        ids.includes(a.id)
+          ? { ...a, acknowledged: true, resolved_at: now }
+          : a,
+      ),
+    )
+    setBanner({ tone: 'info', message: `${active.length} alert${active.length !== 1 ? 's' : ''} cleared.` })
+  }
+
   if (isLoading || !overview) {
     return (
       <section className="dashboard-page dashboard-page--home">
@@ -1466,6 +1452,7 @@ export function DashboardPage() {
             alerts={activeAlerts}
             onOpenLongRunAlert={() => { setModalPhase('question'); setModalOpen(true) }}
             onAcknowledge={(id) => void handleAcknowledgeAlert(id)}
+            onClearAll={() => void handleClearAllAlerts()}
           />
           <div className="right-divider" />
           <QuickActionsPanel

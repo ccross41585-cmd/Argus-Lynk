@@ -6,6 +6,7 @@ type AlertsPanelProps = {
   alerts: AlertRecord[]
   onOpenLongRunAlert: () => void
   onAcknowledge: (alertId: string) => void
+  onClearAll: () => void
 }
 
 function SwipeableAlertRow({
@@ -82,10 +83,22 @@ function SwipeableAlertRow({
   )
 }
 
-export function AlertsPanel({ alerts, onOpenLongRunAlert, onAcknowledge }: AlertsPanelProps) {
+export function AlertsPanel({ alerts, onOpenLongRunAlert, onAcknowledge, onClearAll }: AlertsPanelProps) {
   return (
     <div className="right-section" id="alerts">
-      <p className="eyebrow">Active Alerts</p>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+        <p className="eyebrow" style={{ margin: 0 }}>Active Alerts</p>
+        {alerts.length > 0 && (
+          <button
+            type="button"
+            className="ghost-button btn-sm"
+            onClick={onClearAll}
+            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+          >
+            Clear All
+          </button>
+        )}
+      </div>
 
       {alerts.length === 0 ? (
         <p className="muted-copy empty-state">No active alerts.</p>

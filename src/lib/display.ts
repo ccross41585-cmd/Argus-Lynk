@@ -44,7 +44,9 @@ export function isPendingStatus(status: string | null | undefined) {
     status === 'sent' ||
     status === 'gateway_received' ||
     status === 'sent_to_node' ||
-    status === 'node_acknowledged'
+    status === 'acknowledged' ||
+    status === 'node_acknowledged' ||
+    status === 'verifying'
 }
 
 export function maskProjectUrl(url: string) {
