@@ -20,7 +20,7 @@ const char* GATEWAY_ID = "home-base-001";
 //   devices.target_firmware_version column in Supabase to drive staged rollout,
 //   update-available notifications, and rollback tracking.  The gateway OTA
 //   hostname is argus-gateway-<GATEWAY_ID> (e.g. argus-gateway-home-base-001).
-const char* DEVICE_FIRMWARE_VERSION = "1.1.5";
+const char* DEVICE_FIRMWARE_VERSION = "1.1.6";
 const char* DEVICE_BUILD_DATE       = "2026-06-18";
 const char* DEVICE_ROLE             = "gateway";
 const bool  OTA_SUPPORTED           = true;
@@ -573,6 +573,19 @@ bool markCommandSent(const PendingCommand& command) {
   String payload;
   serializeJson(body, payload);
   if (!sendJsonPatch(url, payload, "PATCH device_commands sent")) {
+    // Schema compatibility: lifecycle timestamp columns may be missing.
+    if (isSchemaMissingColumnError()) {
+      Serial.println("[SCHEMA COMPAT] device_commands lifecycle column missing. Retrying sent patch with minimal payload.");
+      DynamicJsonDocument compatBody(128);
+      compatBody["status"] = "gateway_received";
+      compatBody["gateway_id"] = GATEWAY_ID;
+      String compatPayload;
+      serializeJson(compatBody, compatPayload);
+      if (sendJsonPatch(url, compatPayload, "PATCH device_commands sent (schema fallback)")) {
+        goto command_sent_ok;
+      }
+    }
+
     // Backward compatibility: DB may not have lifecycle columns yet.
     DynamicJsonDocument legacyBody(256);
     legacyBody["status"] = "sent";
@@ -586,6 +599,8 @@ bool markCommandSent(const PendingCommand& command) {
       return false;
     }
   }
+
+command_sent_ok:
 
   String desiredState = commandToConfirmedState(command.command);
   if (desiredState == "on" || desiredState == "off") {
@@ -868,17 +883,14 @@ bool markCommandFailed(const PendingCommand& command,
     return true;
   }
 
-  if (failureReason.length() == 0 || !isMissingFailureReasonColumnError()) {
+  if (!isSchemaMissingColumnError()) {
     return false;
   }
 
-  Serial.println("[SCHEMA COMPAT] device_commands.failure_reason missing. Retrying without failure_reason field.");
+  Serial.println("[SCHEMA COMPAT] failed command payload contains missing column(s). Retrying with minimal payload.");
   DynamicJsonDocument fallbackBody(256);
   fallbackBody["status"] = status;
   fallbackBody["error_message"] = errorMessage;
-  if (status == "verification_failed" && nowTs.length() > 0) {
-    fallbackBody["failed_at"] = nowTs;
-  }
   String fallbackPayload;
   serializeJson(fallbackBody, fallbackPayload);
   return sendJsonPatch(url, fallbackPayload, "PATCH device_commands failed (schema fallback)");
