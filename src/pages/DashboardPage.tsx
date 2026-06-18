@@ -270,6 +270,11 @@ export function DashboardPage() {
   const activeFenceDeviceIdRef = useRef<string | null>(null)
   const activeFenceDesiredStateRef = useRef<'ON' | 'OFF' | null>(null)
   const fencePendingStateRef = useRef(false)
+  const latestDevicesRef = useRef<DashboardDevice[]>([])
+
+  useEffect(() => {
+    latestDevicesRef.current = devices
+  }, [devices])
 
   useEffect(() => {
     let isActive = true
@@ -1057,6 +1062,20 @@ export function DashboardPage() {
       window.clearTimeout(fenceCommandHardTimeoutRef.current)
     }
     fenceCommandHardTimeoutRef.current = window.setTimeout(() => {
+      const trackedDeviceId = activeFenceDeviceIdRef.current
+      const targetState = activeFenceDesiredStateRef.current
+      if (trackedDeviceId && targetState) {
+        const fenceDevice = latestDevicesRef.current.find((d) => d.id === trackedDeviceId)
+        if (fenceDevice) {
+          const state = getFencePhysicalState(fenceDevice, latestCommand?.status ?? '')
+          const auxConfirmed = (targetState === 'ON' && state.auxRaw === 'AUX_HIGH')
+            || (targetState === 'OFF' && state.auxRaw === 'AUX_LOW')
+          if (auxConfirmed) {
+            finalizeFenceCommand('success', targetState, `Confirmed ${targetState}`)
+            return
+          }
+        }
+      }
       finalizeFenceCommand('timeout', target, 'Command status timed out. Check device state.')
     }, 45_000)
 
